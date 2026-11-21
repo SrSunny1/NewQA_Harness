@@ -876,7 +876,6 @@ function ModelBar({ conv, opts, busy, onSelect }) {
       title={opts.status === 'error' ? '不可用' : undefined}
       aria-label="模型与思考配置"
     >
-      <span className="model-row-label">模型</span>
       {[
         { key: 'model', label: '模型' },
         { key: 'thought_level', label: '思考' },
@@ -899,7 +898,9 @@ function ModelBar({ conv, opts, busy, onSelect }) {
               value={cur}
               onChange={(e) => onSelect(key, e.target.value)}
             >
-              <option value="">默认</option>
+              <option value="">
+                {ready && dft ? `默认（${shorten(dft, 16)}）` : '默认'}
+              </option>
               {options.map((o) => (
                 <option key={o.value} value={o.value} title={o.value}>
                   {o.name || o.value}
@@ -911,9 +912,7 @@ function ModelBar({ conv, opts, busy, onSelect }) {
                 </option>
               )}
             </select>
-            <small className="model-dft">
-              {ready ? `默认 ${shorten(dft, 16) || '—'}` : loading ? '加载中…' : ''}
-            </small>
+            {loading && <small className="model-dft">加载中…</small>}
           </span>
         );
       })}

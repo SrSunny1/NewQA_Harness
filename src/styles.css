@@ -1491,6 +1491,9 @@ body {
   .composer-settings > summary {
     margin-inline: 14px;
   }
+  .mode-row {
+    padding: 0 14px;
+  }
   .model-row {
     padding: 6px 14px 2px;
   }
@@ -1997,6 +2000,7 @@ body {
   align-items: center;
   gap: 8px;
   margin: 4px 0;
+  padding: 0 clamp(16px, 5vw, 64px);
 }
 .mode-seg {
   display: inline-flex;

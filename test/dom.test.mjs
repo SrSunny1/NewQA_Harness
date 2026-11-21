@@ -301,9 +301,9 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
     ['adaptive', 'opus', 'sonnet'],
   );
   assert.equal(m.value, '');
-  // 行内小字显示 Devin 当前默认（currentValue → name）
+  // 默认项标签显示 Devin 当前默认（currentValue → name）
   const row = container.querySelector('.model-row');
-  assert.match(row.textContent, /默认 Adaptive/);
+  assert.match(row.textContent, /默认（Adaptive）/);
   await select(m, 'opus');
   await select(t, 'low');
   await select(s, 'fast');
