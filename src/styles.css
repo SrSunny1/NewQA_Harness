@@ -2063,6 +2063,13 @@ body {
   font-size: 11px;
   white-space: nowrap;
 }
+/* 速度 Fast 会解析为收费快速变体（SWE-2 → Lightning） */
+.model-warn {
+  color: var(--warn-ink);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 /* 本轮实际生效模型（done 上报值）：SWE-2 系走 muted，其余标黄提醒计费 */
 .model-eff {
   margin-left: auto;

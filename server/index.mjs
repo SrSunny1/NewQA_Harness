@@ -46,6 +46,10 @@ const PERMITTED_KINDS = new Set(['allow_once', 'reject_once']);
 const PERMISSION_MODES = new Set(['accept-edits', 'smart', 'bypass']);
 const MODEL_CONFIG_KEY_SET = new Set(MODEL_CONFIG_KEYS);
 const MODEL_CONFIG_VALUE_LIMIT = 128;
+// 免费 SWE-2 家族（含 family 别名）：速度 fast 会被 Devin 解析成收费的
+// Lightning 变体，因此默认 fail closed，避免「看着免费实际扣额度」。
+const FREE_MODEL = /^swe-2(?:-flash)?(?:-(?:medium|high|max))?$/i;
+const ALLOW_PAID_FAST = process.env.DEVIN_ALLOW_PAID_FAST === '1';
 const OPTIONS_CACHE_TTL = 5 * 60 * 1000; // /api/devin/options 探测结果缓存
 const GIT_CAP = 12 * 1024;
 const GIT_TIMEOUT = 4000;
@@ -155,6 +159,21 @@ export function validateChatBody(body) {
       }
       mc[k] = v;
     }
+  }
+  // 免费模型 + Fast = 收费 Lightning 变体：默认拒绝，避免静默计费。
+  // model 为 ''（跟随全局默认）同样拦截——服务端无法确认默认解析值，宁可挡住。
+  // 仅 work 生效：discussion（summarizer）模型固定，speed 不下发，不挡。
+  // 确需付费加速可显式设置 DEVIN_ALLOW_PAID_FAST=1。
+  if (
+    kind === 'work' &&
+    mc.speed === 'fast' &&
+    (mc.model === '' || FREE_MODEL.test(mc.model)) &&
+    !ALLOW_PAID_FAST
+  ) {
+    return {
+      error:
+        '速度 Fast 会把 SWE-2（含默认模型解析为 SWE-2 时）计费为 Lightning 变体、扣周额度；请把速度改为 Standard，或显式选择付费模型',
+    };
   }
   if (!Array.isArray(history) || history.length > LIMITS.history) {
     return { error: `对话历史格式不正确或超过 ${LIMITS.history} 条上限` };

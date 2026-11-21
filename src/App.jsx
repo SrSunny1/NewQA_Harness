@@ -47,6 +47,7 @@ import {
   DEFAULT_MODEL_CONFIG,
   buildChatBody,
   isBillableModel,
+  isBillableSpeed,
   MAX_IMAGES,
 } from './model.js';
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
@@ -848,19 +849,27 @@ function WorkspaceBar({ conv, defaultCwd, busy: running, onApply, onBrowse }) {
 // 实际生效模型标签：done 事件上报值 → 探测选项命中时显示名称，否则原始值。
 // 只有免费档精确 SKU 不标黄；Fusion（UID 含 sidekick-swe-2）与
 // swe-2-*-lightning 等计费变体都会标黄（判定见 model.js isBillableModel）。
-function EffectiveModelTag({ value, opts }) {
+// ACP 的 configOption 只报家族值（如 swe-2-high），速度 Fast 实际会被
+// Devin 解析成收费的 Lightning 变体，因此 speed=fast 也按计费标黄。
+function EffectiveModelTag({ value, opts, speed = '' }) {
   const options =
     opts.status === 'ok' && Array.isArray(opts.config?.model?.options)
       ? opts.config.model.options
       : [];
   const name = options.find((o) => o.value === value)?.name || value;
-  const billable = isBillableModel(value);
+  const fast = isBillableSpeed(speed);
+  const billable = isBillableModel(value) || fast;
+  const reasons = [
+    isBillableModel(value) ? '此模型不在免费档（计费）' : '',
+    fast ? '速度 Fast 会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度' : '',
+  ].filter(Boolean);
   return (
     <span
       className={`model-eff ${billable ? 'warn' : ''}`}
-      title={billable ? '此模型不在免费档（计费）' : undefined}
+      title={billable ? reasons.join('；') : undefined}
     >
       实际：{name}
+      {fast ? '（Fast 计费）' : ''}
     </span>
   );
 }
@@ -882,6 +891,14 @@ function ModelBar({ conv, opts, busy, onSelect }) {
     cfgModel === effFor
       ? effValue || cfgModel || curValue
       : cfgModel || curValue || effValue;
+  const cfgSpeed = typeof cfg.speed === 'string' ? cfg.speed : '';
+  const dftSpeed = ready ? opts.config?.speed?.currentValue : '';
+  const speedValue = cfgSpeed || dftSpeed || '';
+  const fastSpeed = isBillableSpeed(speedValue);
+  // 实际模型标签绑定的是上一回合：模型选择未变时用那次的 speed，
+  // 选择已变则按当前 speed 预览下一回合。
+  const tagSpeed =
+    (cfgModel === effFor ? conv.effSpeed || speedValue : speedValue) || '';
   return (
     <div
       className="model-row markup-ui"
@@ -916,6 +933,7 @@ function ModelBar({ conv, opts, busy, onSelect }) {
               {options.map((o) => (
                 <option key={o.value} value={o.value} title={o.value}>
                   {o.name || o.value}
+                  {key === 'speed' && o.value === 'fast' ? '（计费）' : ''}
                 </option>
               ))}
               {!!cur && !options.some((o) => o.value === cur) && (
@@ -924,11 +942,21 @@ function ModelBar({ conv, opts, busy, onSelect }) {
                 </option>
               )}
             </select>
+            {key === 'speed' && fastSpeed && (
+              <small
+                className="model-warn"
+                title="速度 Fast 会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度；改成 Standard 即可免费"
+              >
+                Fast 计费
+              </small>
+            )}
             {loading && <small className="model-dft">加载中…</small>}
           </span>
         );
       })}
-      {!!resolvedModel && <EffectiveModelTag value={resolvedModel} opts={opts} />}
+      {!!resolvedModel && (
+        <EffectiveModelTag value={resolvedModel} opts={opts} speed={tagSpeed} />
+      )}
     </div>
   );
 }
@@ -2323,6 +2351,8 @@ export default function App() {
     // 选择变了就即时改显选中项，不变就显示真实解析值。
     const modelAtSend =
       typeof c.modelConfig?.model === 'string' ? c.modelConfig.model : '';
+    const speedAtSend =
+      typeof c.modelConfig?.speed === 'string' ? c.modelConfig.speed : '';
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -2423,6 +2453,7 @@ export default function App() {
             // 本轮实际生效模型持久化到会话（done 未上报时沿用上次值）
             effectiveModel: doneModel || c2.effectiveModel || null,
             effFor: doneModel ? modelAtSend : c2.effFor || '',
+            effSpeed: doneModel ? speedAtSend : c2.effSpeed || '',
             turns: appendTurn(c2.turns, path, turn),
           };
         }),

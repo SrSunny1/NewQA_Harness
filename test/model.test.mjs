@@ -28,6 +28,7 @@ import {
   titleFromQuestion,
   buildChatBody,
   isBillableModel,
+  isBillableSpeed,
 } from '../src/model.js';
 
 const T = (id, q, a, extra = {}) => ({
@@ -615,6 +616,28 @@ test('parseStored：conv.effectiveModel ≤128 与 turn.model 兼容消毒', () 
   assert.ok(!('usage' in turn), '旧档 usage 字段不再保留');
   const bareTurn = s.conversations[1].turns[0];
   assert.ok(!('model' in bareTurn), '非法值不保留字段');
+});
+
+test('isBillableSpeed：Fast 计费，Standard/缺省不计费', () => {
+  assert.equal(isBillableSpeed('fast'), true);
+  for (const value of ['standard', '', null, undefined, 'max']) {
+    assert.equal(isBillableSpeed(value), false, String(value));
+  }
+});
+
+test('parseStored：effSpeed 字符串消毒', () => {
+  const s = parseStored(
+    JSON.stringify({
+      conversations: [{ id: 'a', title: 'x', effSpeed: 'fast', turns: [] }],
+    }),
+  );
+  assert.equal(s.conversations[0].effSpeed, 'fast');
+  const bad = parseStored(
+    JSON.stringify({
+      conversations: [{ id: 'b', title: 'y', effSpeed: 7, turns: [] }],
+    }),
+  );
+  assert.equal(bad.conversations[0].effSpeed, '');
 });
 
 test('isBillableModel：仅免费档 SWE-2 精确 SKU 不计费', () => {

@@ -105,6 +105,14 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   不跟随全局默认，避免全局是 Fusion 等付费模型时支线也计费。
   `/api/chat` 只接受 `model`/`thought_level`/`speed` 三键、≤128 字符串，
   其余一律 400。
+  ⚠️ **速度 Fast 是收费变体**：Devin 会把免费 `swe-2-*` 解析成
+  `swe-2-*-lightning`（`devin models` 里 Lightning 全部按 $1/$0.1/$5 收费），
+  但 ACP `configOptions` 仍只报家族值（如 `swe-2-high`），看起来像免费。
+  因此「免费 SWE-2 + speed=fast」默认 **fail closed**（400，不 spawn、
+  不发 prompt）；`model` 留空（跟随全局默认）时服务端无法确认解析值，
+  同样按此拦截。避免静默扣周额度；确需付费加速可设
+  `DEVIN_ALLOW_PAID_FAST=1`。速度下拉的 Fast 选项标「（计费）」，
+  选中时行内常驻「Fast 计费」提示。
 
 ## 实际模型
 
@@ -116,7 +124,12 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   否则原值）；该值同时持久化到会话 `effectiveModel` 与回合 `turn.model`。
 - **旧会话续聊沿用其存储模型**：`session/load` 回来的 `configOptions`
   记录的可能是当初选的模型，而非当前账号默认值。想换模型用下拉覆盖，
-  下一回合生效。
+  下一回合生效。speed 同理：旧会话若存的是 Fast，选「默认」不会覆盖它，
+  必须显式选 Standard 才会切回免费变体。
+- **速度 Fast 时实际模型是收费变体**：ACP 只报家族值，Devin 内部会解析成
+  `swe-2-*-lightning`（`sessions.db` 的 `model` 列记录的才是解析后的模型）。
+  所以 `实际：` 标签会结合 speed=fast 标黄并追加「（Fast 计费）」，
+  只看模型名不足以判断是否计费。
 - `实际：` 只有精确的免费 SKU（`swe-2-medium/high/max`、
   `swe-2-flash-medium/high/max`）不标黄；其余标黄提醒「此模型不在免费档
   （计费）」。注意 Fusion 的 UID 里也含 `sidekick-swe-2`（副模型免费、
@@ -180,8 +193,8 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   `modelConfig` 三键白名单校验（未知键/非字符串/超长 → 400）。
 - discussion 用 `--agent-type summarizer --model <免费档>`（默认
   swe-2-flash-medium，可用 `DEVIN_DISCUSSION_MODEL` 覆盖）、忽略 sessionId
-  与 modelConfig、权限自动拒绝；Fusion/lightning 计费提示与免费 SKU
-  判定有单测覆盖。
+  与 modelConfig、权限自动拒绝；Fusion/lightning 计费提示、免费 SKU 判定、
+  「免费 SWE-2 + Fast → 400」防线与 Fast 计费标签均有单测覆盖。
 - 工具事件归一化、权限决策全生命周期（无自动批准、404/400）、git fixture
   快照（应用不写文件）、workspace/sessionId/kind 校验、静态遍历、413/415/403/409。
 - DOM（jsdom + React act，mock 全部 /api）：`/co` 过滤面板、Enter/Tab 接受

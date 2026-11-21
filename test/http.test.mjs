@@ -545,6 +545,37 @@ test('modelConfig 校验：非对象/未知键/非字符串/超长 → 400；合
   );
 });
 
+test('免费 SWE-2 + Fast → 400（防 Lightning 静默计费）；Standard/付费模型放行', async () => {
+  const free = (model, speed) =>
+    validateChatBody({ ...VALID, kind: 'work', modelConfig: { model, speed } });
+  for (const model of [
+    'swe-2',
+    'swe-2-high',
+    'swe-2-flash-medium',
+    'swe-2-max',
+    'swe-2-flash-max',
+  ]) {
+    const r = free(model, 'fast');
+    assert.match(r.error, /Fast.*Lightning/, model);
+  }
+  assert.ok(!free('swe-2-high', 'standard').error, 'Standard 放行');
+  assert.ok(!free('swe-2-high', '').error, '缺省速度放行');
+  assert.ok(
+    !free('claude-opus-5-5-medium', 'fast').error,
+    '付费模型 + Fast 本来就有意加速，放行',
+  );
+  // HTTP 层：请求在 spawn 前被拒
+  await withServer(async (base) => {
+    const res = await post(base, {
+      ...VALID,
+      kind: 'work',
+      modelConfig: { model: 'swe-2-flash-medium', speed: 'fast' },
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /Standard/);
+  });
+});
+
 test('work POST 带 modelConfig → set_config_option 在 set_mode 前；discussion 忽略', async () => {
   const spawn = fakeSpawn(workScript());
   let child;

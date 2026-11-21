@@ -32,6 +32,9 @@ const EFFECTIVE_MODEL_LIMIT = 128;
 // 免费、主模型计费），swe-2-*-lightning 也是收费变体；未知值按计费处理。
 const FREE_MODEL = /^swe-2(?:-flash)?-(?:medium|high|max)$/i;
 export const isBillableModel = (value) => !FREE_MODEL.test(String(value || ''));
+// 速度 Fast 会把模型解析成收费的快速变体（SWE-2 → swe-2-*-lightning，
+// Claude/GPT → *-fast / *-priority）；'' = 跟随全局默认，由调用方解析。
+export const isBillableSpeed = (speed) => speed === 'fast';
 
 // 存档里的 modelConfig → 固定三键；非对象/缺省回默认，未知值保留字符串。
 export function asModelConfig(raw) {
@@ -113,6 +116,7 @@ export function createConversation(workspace = '') {
     modelConfig: { ...DEFAULT_MODEL_CONFIG },
     effectiveModel: null, // 最近一轮实际生效的模型值（done 事件上报）
     effFor: '', // 该生效值对应的 model 选择（选择变了就不再用 effectiveModel 展示）
+    effSpeed: '', // 该生效值对应的 speed 选择（Fast 计费提示用）
   };
 }
 
@@ -527,6 +531,8 @@ export function parseStored(raw) {
                 : null,
             effFor:
               typeof c.effFor === 'string' ? c.effFor.slice(0, EFFECTIVE_MODEL_LIMIT) : '',
+            effSpeed:
+              typeof c.effSpeed === 'string' ? c.effSpeed.slice(0, EFFECTIVE_MODEL_LIMIT) : '',
           }
         : null,
     )

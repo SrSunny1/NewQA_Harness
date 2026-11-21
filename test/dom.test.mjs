@@ -60,6 +60,7 @@ const OPTIONS = {
       currentValue: 'adaptive',
       options: [
         { value: 'adaptive', name: 'Adaptive' },
+        { value: 'swe-2-high', name: 'SWE-2' },
         { value: 'opus', name: 'Opus' },
         { value: 'sonnet', name: 'Sonnet' },
       ],
@@ -298,7 +299,7 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
   assert.equal(m.options[0].value, '');
   assert.deepEqual(
     [...m.options].slice(1).map((o) => o.value),
-    ['adaptive', 'opus', 'sonnet'],
+    ['adaptive', 'swe-2-high', 'opus', 'sonnet'],
   );
   assert.equal(m.value, '');
   // 默认项标签显示 Devin 当前默认（currentValue → name）
@@ -557,7 +558,7 @@ test('dom：done 带 model → 实际模型行（Fusion 含 swe-2 也标黄）',
     assert.ok(eff, '实际模型行渲染');
     assert.match(eff.textContent, /实际：fusion-gpt-6-2-sol-medium-sidekick-swe-2-high/);
     assert.ok(eff.classList.contains('warn'), 'Fusion → warn 标黄');
-    assert.equal(eff.getAttribute('title'), '此模型不在免费档（计费）');
+    assert.match(eff.getAttribute('title'), /此模型不在免费档（计费）/);
     // 持久化：conv.effectiveModel + turn.model
     const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
     const conv = stored.conversations.find((c) => c.id === stored.activeId);
@@ -570,6 +571,9 @@ test('dom：done 带 model → 实际模型行（Fusion 含 swe-2 也标黄）',
 });
 
 test('dom：SWE-2 模型不标黄；无 model 上报时实际行隐藏', async () => {
+  // 前面的测试把速度选成了 fast；先切回 standard，单独验证模型维度
+  const sels = container.querySelectorAll('.model-select');
+  await select(sels[2], 'standard');
   chatResponder = () =>
     ndjson([
       { type: 'delta', text: '答：swe' },
@@ -591,6 +595,44 @@ test('dom：SWE-2 模型不标黄；无 model 上报时实际行隐藏', async (
     const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
     const conv = stored.conversations.find((c) => c.id === stored.activeId);
     assert.equal(conv.effectiveModel, 'swe-2-flash-max');
+  } finally {
+    chatResponder = null;
+  }
+});
+
+test('dom：速度 Fast 标「计费」，SWE-2 实际模型行也标黄', async () => {
+  // 前面的测试已把速度选成 fast；这里把模型切到免费的 SWE-2 家族
+  const [m, , s] = container.querySelectorAll('.model-select');
+  await select(m, 'swe-2-high');
+  await select(s, 'fast');
+  const row = container.querySelector('.model-row');
+  assert.ok(row.querySelector('.model-warn'), '速度 Fast 有常驻计费提示');
+  assert.match(row.textContent, /Fast 计费/);
+  const fastOpt = [...s.options].find((o) => o.value === 'fast');
+  assert.match(fastOpt.textContent, /Fast（计费）/, 'Fast 选项标签标明计费');
+
+  // done 只上报家族值 swe-2-high；提示必须结合 speed=fast 标黄
+  chatResponder = () =>
+    ndjson([
+      { type: 'delta', text: '答：fast' },
+      { type: 'done', sessionId: 'sess-f', model: 'swe-2-high' },
+    ]);
+  try {
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, 'fast 测试');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(40);
+    });
+    const eff = container.querySelector('.model-eff');
+    assert.ok(eff, '实际模型行渲染');
+    assert.match(eff.textContent, /实际：SWE-2（Fast 计费）/);
+    assert.ok(eff.classList.contains('warn'), 'Fast → warn 标黄');
+    assert.match(eff.getAttribute('title'), /Lightning/);
+    // effSpeed 与 effFor 一起持久化
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv = stored.conversations.find((c) => c.id === stored.activeId);
+    assert.equal(conv.effSpeed, 'fast');
   } finally {
     chatResponder = null;
   }
