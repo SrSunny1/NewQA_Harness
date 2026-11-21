@@ -2838,11 +2838,7 @@ export default function App() {
             {!conv && (
               <section className="blank">
                 <h1 className="blank-title">NewQA</h1>
-                <p className="blank-sub">
-                  和本机的 Devin 聊一聊；划词即可标注、追问，
-                  <br />
-                  所有记录只存在这台机器上。
-                </p>
+                <p className="blank-sub">新一代harness</p>
                 <div className="chips">
                   {EXAMPLES.map((t) => (
                     <button
