@@ -2881,6 +2881,7 @@ export default function App() {
           </button>
         )}
         <div className="brand">
+          <img className="brand-logo" src="/icon.png" alt="" />
           NewQA<span className="brand-sub">新一代harness</span>
         </div>
         <div
