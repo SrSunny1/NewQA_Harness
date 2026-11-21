@@ -575,45 +575,61 @@ body {
   background: #f9a8d4;
 }
 
-/* 支线五色（参照 CodeSlice：(round-1)%5，蓝/绿/琥珀/玫瑰/薰衣草） */
+/* 支线五色（参照 CodeSlice：(round-1)%5，蓝/绿/琥珀/玫瑰/薰衣草）；
+   --tone-*-bg 面板底色、--tone-*-b 主色、--tone-*-ink 深色文字/徽标。 */
 :root {
-  --tone-0-bg: rgba(96, 165, 250, 0.13);
+  --tone-0-bg: rgba(96, 165, 250, 0.2);
   --tone-0-b: #60a5fa;
-  --tone-1-bg: rgba(74, 222, 128, 0.12);
+  --tone-0-ink: #2563eb;
+  --tone-1-bg: rgba(74, 222, 128, 0.2);
   --tone-1-b: #4ade80;
-  --tone-2-bg: rgba(251, 191, 36, 0.14);
+  --tone-1-ink: #16a34a;
+  --tone-2-bg: rgba(251, 191, 36, 0.22);
   --tone-2-b: #d97706;
-  --tone-3-bg: rgba(251, 113, 133, 0.12);
+  --tone-2-ink: #b45309;
+  --tone-3-bg: rgba(251, 113, 133, 0.2);
   --tone-3-b: #f43f5e;
-  --tone-4-bg: rgba(167, 139, 250, 0.13);
+  --tone-3-ink: #e11d48;
+  --tone-4-bg: rgba(167, 139, 250, 0.2);
   --tone-4-b: #a78bfa;
+  --tone-4-ink: #7c3aed;
 }
 .branch-ui {
   margin: 10px 0 16px;
   padding: 8px 10px 6px 12px;
-  border-left: 3px solid var(--tone-b, var(--c-branch));
+  border-left: 4px solid var(--tone-b, var(--c-branch));
   background: var(--tone-bg, transparent);
   border-radius: 0 8px 8px 0;
 }
 .branch-ui[data-tone='0'] {
   --tone-bg: var(--tone-0-bg);
   --tone-b: var(--tone-0-b);
+  --tone-ink: var(--tone-0-ink);
 }
 .branch-ui[data-tone='1'] {
   --tone-bg: var(--tone-1-bg);
   --tone-b: var(--tone-1-b);
+  --tone-ink: var(--tone-1-ink);
 }
 .branch-ui[data-tone='2'] {
   --tone-bg: var(--tone-2-bg);
   --tone-b: var(--tone-2-b);
+  --tone-ink: var(--tone-2-ink);
 }
 .branch-ui[data-tone='3'] {
   --tone-bg: var(--tone-3-bg);
   --tone-b: var(--tone-3-b);
+  --tone-ink: var(--tone-3-ink);
 }
 .branch-ui[data-tone='4'] {
   --tone-bg: var(--tone-4-bg);
   --tone-b: var(--tone-4-b);
+  --tone-ink: var(--tone-4-ink);
+}
+/* 头部引用行跟随支线色：白底卡片 + 同色左边条，一眼区分嵌套层级 */
+.branch-ui > .anchor-quote {
+  background: var(--panel);
+  border-left-color: var(--tone-b);
 }
 .branch-ui.collapsed {
   border-left-style: dashed;
@@ -1840,15 +1856,24 @@ body {
   border: 1px solid var(--tone-b, var(--line));
   color: var(--ink);
 }
-.b-tag[data-tone='0'] { --tone-b: var(--tone-0-b); }
-.b-tag[data-tone='1'] { --tone-b: var(--tone-1-b); }
-.b-tag[data-tone='2'] { --tone-b: var(--tone-2-b); }
-.b-tag[data-tone='3'] { --tone-b: var(--tone-3-b); }
-.b-tag[data-tone='4'] { --tone-b: var(--tone-4-b); }
+.b-tag[data-tone='0'] { --tone-b: var(--tone-0-b); --tone-ink: var(--tone-0-ink); }
+.b-tag[data-tone='1'] { --tone-b: var(--tone-1-b); --tone-ink: var(--tone-1-ink); }
+.b-tag[data-tone='2'] { --tone-b: var(--tone-2-b); --tone-ink: var(--tone-2-ink); }
+.b-tag[data-tone='3'] { --tone-b: var(--tone-3-b); --tone-ink: var(--tone-3-ink); }
+.b-tag[data-tone='4'] { --tone-b: var(--tone-4-b); --tone-ink: var(--tone-4-ink); }
+/* 索引里的支线标号实色化：与对话内支线面板同色 */
+.b-tag[data-tone] {
+  background: color-mix(in srgb, var(--tone-b) 18%, var(--panel, #fff));
+  border-color: color-mix(in srgb, var(--tone-b) 45%, transparent);
+  color: var(--tone-ink);
+}
 .mark-tag[data-tone] {
   border-radius: 4px;
   padding: 0 5px;
-  border: 1px solid var(--tone-b, transparent);
+  border: 1px solid color-mix(in srgb, var(--tone-b) 45%, transparent);
+  background: color-mix(in srgb, var(--tone-b) 18%, var(--panel, #fff));
+  color: var(--tone-ink, var(--ink-soft));
+  font-weight: 600;
 }
 .idx-cell {
   flex: 1;
