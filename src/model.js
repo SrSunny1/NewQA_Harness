@@ -112,6 +112,7 @@ export function createConversation(workspace = '') {
     permissionMode: 'accept-edits',
     modelConfig: { ...DEFAULT_MODEL_CONFIG },
     effectiveModel: null, // 最近一轮实际生效的模型值（done 事件上报）
+    effFor: '', // 该生效值对应的 model 选择（选择变了就不再用 effectiveModel 展示）
   };
 }
 
@@ -524,6 +525,8 @@ export function parseStored(raw) {
               typeof c.effectiveModel === 'string' && c.effectiveModel
                 ? c.effectiveModel.slice(0, EFFECTIVE_MODEL_LIMIT)
                 : null,
+            effFor:
+              typeof c.effFor === 'string' ? c.effFor.slice(0, EFFECTIVE_MODEL_LIMIT) : '',
           }
         : null,
     )

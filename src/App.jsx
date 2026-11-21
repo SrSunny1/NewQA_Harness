@@ -872,6 +872,16 @@ function ModelBar({ conv, opts, busy, onSelect }) {
   const ready = opts.status === 'ok';
   const loading = opts.status === 'idle' || opts.status === 'loading';
   const cfg = conv.modelConfig || {};
+  // 「实际」模型推导：选择与上次生效同源（effFor）→ 显示 done 上报的真实解析值；
+  // 刚改过选择 → 实时显示选中项（等下回合 done 再换成真实解析值）。
+  const cfgModel = typeof cfg.model === 'string' ? cfg.model : '';
+  const effFor = typeof conv.effFor === 'string' ? conv.effFor : '';
+  const effValue = conv.effectiveModel || '';
+  const curValue = ready ? opts.config?.model?.currentValue : '';
+  const resolvedModel =
+    cfgModel === effFor
+      ? effValue || cfgModel || curValue
+      : cfgModel || curValue || effValue;
   return (
     <div
       className="model-row markup-ui"
@@ -918,7 +928,7 @@ function ModelBar({ conv, opts, busy, onSelect }) {
           </span>
         );
       })}
-      {!!conv.effectiveModel && <EffectiveModelTag value={conv.effectiveModel} opts={opts} />}
+      {!!resolvedModel && <EffectiveModelTag value={resolvedModel} opts={opts} />}
     </div>
   );
 }
@@ -2309,6 +2319,10 @@ export default function App() {
     let changes = null;
     let doneSessionId = null;
     let doneModel = null; // done 上报的本轮实际生效模型
+    // 本轮使用的 model 选择快照：done 上报的生效值与"哪次选择"绑定，
+    // 选择变了就即时改显选中项，不变就显示真实解析值。
+    const modelAtSend =
+      typeof c.modelConfig?.model === 'string' ? c.modelConfig.model : '';
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -2408,6 +2422,7 @@ export default function App() {
               kind === 'work' && doneSessionId ? doneSessionId : c2.sessionId,
             // 本轮实际生效模型持久化到会话（done 未上报时沿用上次值）
             effectiveModel: doneModel || c2.effectiveModel || null,
+            effFor: doneModel ? modelAtSend : c2.effFor || '',
             turns: appendTurn(c2.turns, path, turn),
           };
         }),
