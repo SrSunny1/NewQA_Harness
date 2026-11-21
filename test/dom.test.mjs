@@ -213,9 +213,9 @@ const findBtn = (re) =>
 test('dom：新对话 + conv 挂载自动取 /api/devin/options（静默一次）', async () => {
   window.localStorage.clear();
   await mountApp();
-  // 无会话时主输入框不存在；点「＋ 新对话」
-  const newBtn = findBtn(/新对话/);
-  assert.ok(newBtn, '侧栏有新对话按钮');
+  // 无会话时主输入框不存在；点未分组的「＋」新建
+  const newBtn = container.querySelector('[aria-label="在未分组新建对话"]');
+  assert.ok(newBtn, '未分组有新建按钮');
   await click(newBtn);
   await act(async () => {
     await tick(30);

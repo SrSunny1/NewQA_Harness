@@ -226,19 +226,6 @@ body {
   background: var(--bg-soft);
   animation: rise 0.4s ease both;
 }
-.btn-new {
-  width: 100%;
-  padding: 9px 12px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--ink);
-  font-size: 14px;
-  cursor: pointer;
-}
-.btn-new:hover {
-  background: var(--accent-soft);
-}
 .conv-list {
   list-style: none;
   margin: 12px 0 0;

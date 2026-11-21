@@ -1352,10 +1352,6 @@ function Sidebar(props) {
 
   return (
     <>
-      <button className="btn-new" type="button" onClick={() => onNewChat()}>
-        ＋ 新对话
-      </button>
-
       <div className="ws-groups">
         <div className="ws-groups-head">
           <span className="ws-groups-title">工作区</span>
@@ -1490,6 +1486,15 @@ function Sidebar(props) {
                 {collapsedKeys.includes(UNGROUPED_KEY) ? '▸' : '▾'}
               </span>
               <span className="ws-group-name">未分组</span>
+            </button>
+            <button
+              type="button"
+              className="mini-btn ws-group-new"
+              title="在未分组新建对话"
+              aria-label="在未分组新建对话"
+              onClick={() => onNewChat()}
+            >
+              ＋
             </button>
           </div>
           {!collapsedKeys.includes(UNGROUPED_KEY) && (
@@ -2808,7 +2813,7 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <p className="blank-tip">点击左侧「＋ 新对话」开始</p>
+                <p className="blank-tip">点击左侧分组的「＋」开始</p>
               </section>
             )}
 
