@@ -1807,6 +1807,18 @@ export default function App() {
   const panelPx = effectivePanelWidths(layout, viewportWidth);
   if (!narrow && layout.rightCollapsed) panelPx.right = 34;
 
+  // 重新进入/切换会话时定位到最新回合（而非停留在顶部）；
+  // 等一小拍让缩略图解码后再滚，避免滚完被撑高。
+  const convId = conv?.id ?? null;
+  useEffect(() => {
+    if (!convId) return;
+    const t = setTimeout(() => {
+      const sc = transcriptRef.current;
+      if (sc) sc.scrollTop = sc.scrollHeight;
+    }, 60);
+    return () => clearTimeout(t);
+  }, [convId]);
+
   // ---- 布局持久化 ----
   useEffect(() => {
     try {
