@@ -310,7 +310,11 @@ async function serveStatic(req, res, pathname, distDir) {
     if (!SAFE_NAME.test(name)) return false;
     file = path.join(distDir, 'assets', name);
   } else {
-    return false;
+    // dist 根级文件（icon.png / favicon.ico 等 public/ 产物）；
+    // SAFE_NAME 不含 '/'，子目录与 ../ 穿越天然挡掉。
+    const name = pathname.slice(1);
+    if (!SAFE_NAME.test(name)) return false;
+    file = path.join(distDir, name);
   }
   try {
     const data = await readFile(file);

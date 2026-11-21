@@ -654,13 +654,19 @@ function ToolList({ tools }) {
               TOOL_KIND_LABEL[t.kind] ?? (t.kind && t.kind !== 'other' ? t.kind : '');
             return kl ? <span className="tool-kind">{kl}</span> : null;
           })()}
-          <span className="tool-title" title={t.title || t.id}>
-            {t.title && !/^call_/i.test(t.title)
-              ? shorten(t.title, 80)
-              : t.command
-                ? '执行命令'
-                : '工具调用'}
-          </span>
+          {(() => {
+            const txt =
+              t.title && !/^call_/i.test(t.title)
+                ? shorten(t.title, 80)
+                : t.command
+                  ? '执行命令'
+                  : '';
+            return txt ? (
+              <span className="tool-title" title={t.title || t.id}>
+                {txt}
+              </span>
+            ) : null;
+          })()}
           {(t.command || t.output) && (
             <details className="tool-detail">
               <summary>{t.command ? `$ ${shorten(t.command, 90)}` : '查看输出'}</summary>
