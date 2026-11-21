@@ -27,7 +27,7 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
 | | 主线（底部输入框） | 支线（划词「追问」） |
 | --- | --- | --- |
 | kind | `work` | `discussion` |
-| agent | `devin acp`（默认 agent） | `devin acp --agent-type summarizer`（无工具） |
+| agent | `devin acp`（默认 agent） | `devin acp --agent-type summarizer --model swe-2-flash-medium`（无工具，固定免费档；`DEVIN_DISCUSSION_MODEL` 可覆盖） |
 | 会话 | 原生 `session/new` / `session/load` 续聊 | 每轮全新会话，客户端回放上下文 |
 | 上下文 | Devin 侧原生记忆 | JSON envelope：历史 + 引用选段 + 问题 |
 | 工具/权限 | 工具事件上屏 + 权限决策卡片 | 无工具；权限一律自动拒绝 |
@@ -100,7 +100,9 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   **对下一回合生效**（回合进行中禁用）；探测失败整行禁用并标「不可用」。
   服务端在每个 work 回合的 `session/set_mode` **之前**对非空键逐个调
   `session/set_config_option {sessionId, configId, value}`（RPC 失败即终止，
-  fail closed，不发 prompt）；discussion 回合忽略该字段。
+  fail closed，不发 prompt）；discussion 回合忽略该字段，但固定带
+  `--model swe-2-flash-medium`（免费档，可用 `DEVIN_DISCUSSION_MODEL` 覆盖），
+  不跟随全局默认，避免全局是 Fusion 等付费模型时支线也计费。
   `/api/chat` 只接受 `model`/`thought_level`/`speed` 三键、≤128 字符串，
   其余一律 400。
 
@@ -115,8 +117,11 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
 - **旧会话续聊沿用其存储模型**：`session/load` 回来的 `configOptions`
   记录的可能是当初选的模型，而非当前账号默认值。想换模型用下拉覆盖，
   下一回合生效。
-- `实际：` 值不匹配 `/swe-?2/i` 时标黄提醒「此模型不在免费档（计费）」——
-  **只是启发式提示**，SWE-2 家族走正常 muted 色，不保证计费判断准确。
+- `实际：` 只有精确的免费 SKU（`swe-2-medium/high/max`、
+  `swe-2-flash-medium/high/max`）不标黄；其余标黄提醒「此模型不在免费档
+  （计费）」。注意 Fusion 的 UID 里也含 `sidekick-swe-2`（副模型免费、
+  主模型计费），`swe-2-*-lightning` 也是收费变体，因此不能按「包含 swe-2」
+  判断；判定见 `src/model.js` 的 `isBillableModel`。
 
 ## 标注 / 支线 / 导航
 
@@ -173,8 +178,10 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   空键/缺省不下发、RPC 错误 fail closed；`/api/devin/options` 探测归一化
   （commands + 三项 config，过滤其余 configId）与 5 分钟缓存/失败不缓存；
   `modelConfig` 三键白名单校验（未知键/非字符串/超长 → 400）。
-- discussion 用 `--agent-type summarizer`、忽略 sessionId 与 modelConfig、
-  权限自动拒绝。
+- discussion 用 `--agent-type summarizer --model <免费档>`（默认
+  swe-2-flash-medium，可用 `DEVIN_DISCUSSION_MODEL` 覆盖）、忽略 sessionId
+  与 modelConfig、权限自动拒绝；Fusion/lightning 计费提示与免费 SKU
+  判定有单测覆盖。
 - 工具事件归一化、权限决策全生命周期（无自动批准、404/400）、git fixture
   快照（应用不写文件）、workspace/sessionId/kind 校验、静态遍历、413/415/403/409。
 - DOM（jsdom + React act，mock 全部 /api）：`/co` 过滤面板、Enter/Tab 接受

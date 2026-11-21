@@ -534,14 +534,15 @@ test('dom：工具调用插入回答实际位置，流式与持久化顺序一�
   }
 });
 
-test('dom：done 带 model → 实际模型行（非 swe-2 标黄）', async () => {
+test('dom：done 带 model → 实际模型行（Fusion 含 swe-2 也标黄）', async () => {
   chatResponder = () =>
     ndjson([
       { type: 'delta', text: '答：模型' },
       {
         type: 'done',
         sessionId: 'sess-u',
-        model: 'fusion-gpt-6-2-sidekick',
+        // Fusion 的 UID 里含 sidekick-swe-2，但主模型计费，必须标黄
+        model: 'fusion-gpt-6-2-sol-medium-sidekick-swe-2-high',
       },
     ]);
   try {
@@ -551,18 +552,18 @@ test('dom：done 带 model → 实际模型行（非 swe-2 标黄）', async () 
     await act(async () => {
       await tick(40);
     });
-    // 对话设置模型行：实际：值，fusion 不匹配 swe-?2 → warn 标黄
+    // 对话设置模型行：实际：值，Fusion 即使含 swe-2 也按计费标黄
     const eff = container.querySelector('.model-eff');
     assert.ok(eff, '实际模型行渲染');
-    assert.match(eff.textContent, /实际：fusion-gpt-6-2-sidekick/);
-    assert.ok(eff.classList.contains('warn'), '非 SWE-2 → warn 标黄');
+    assert.match(eff.textContent, /实际：fusion-gpt-6-2-sol-medium-sidekick-swe-2-high/);
+    assert.ok(eff.classList.contains('warn'), 'Fusion → warn 标黄');
     assert.equal(eff.getAttribute('title'), '此模型不在免费档（计费）');
     // 持久化：conv.effectiveModel + turn.model
     const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
     const conv = stored.conversations.find((c) => c.id === stored.activeId);
-    assert.equal(conv.effectiveModel, 'fusion-gpt-6-2-sidekick');
+    assert.equal(conv.effectiveModel, 'fusion-gpt-6-2-sol-medium-sidekick-swe-2-high');
     const lastStored = conv.turns.at(-1);
-    assert.equal(lastStored.model, 'fusion-gpt-6-2-sidekick');
+    assert.equal(lastStored.model, 'fusion-gpt-6-2-sol-medium-sidekick-swe-2-high');
   } finally {
     chatResponder = null;
   }
@@ -584,7 +585,7 @@ test('dom：SWE-2 模型不标黄；无 model 上报时实际行隐藏', async (
     const eff = container.querySelector('.model-eff');
     assert.ok(eff, '实际模型行渲染');
     assert.match(eff.textContent, /实际：swe-2-flash-max/);
-    assert.ok(!eff.classList.contains('warn'), 'SWE-2 家族 → 不标黄');
+    assert.ok(!eff.classList.contains('warn'), '免费 SKU → 不标黄');
     assert.equal(eff.getAttribute('title'), null);
     // 持久化覆盖为最新值
     const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));

@@ -27,6 +27,7 @@ import {
   DEFAULT_LAYOUT,
   titleFromQuestion,
   buildChatBody,
+  isBillableModel,
 } from '../src/model.js';
 
 const T = (id, q, a, extra = {}) => ({
@@ -614,4 +615,32 @@ test('parseStored：conv.effectiveModel ≤128 与 turn.model 兼容消毒', () 
   assert.ok(!('usage' in turn), '旧档 usage 字段不再保留');
   const bareTurn = s.conversations[1].turns[0];
   assert.ok(!('model' in bareTurn), '非法值不保留字段');
+});
+
+test('isBillableModel：仅免费档 SWE-2 精确 SKU 不计费', () => {
+  for (const value of [
+    'swe-2-medium',
+    'swe-2-high',
+    'swe-2-max',
+    'swe-2-flash-medium',
+    'swe-2-flash-high',
+    'swe-2-flash-max',
+  ]) {
+    assert.equal(isBillableModel(value), false, value);
+  }
+  for (const value of [
+    // lightning 是收费变体，虽然名字里带 swe-2
+    'swe-2-medium-lightning',
+    'swe-2-max-lightning',
+    'swe-2-flash-medium-lightning',
+    // Fusion 的 UID 里也含 sidekick-swe-2，但主模型计费
+    'fusion-gpt-6-2-sol-medium-sidekick-swe-2-high',
+    'fusion-claude-opus-5-5-medium-sidekick-swe-2-medium',
+    'claude-opus-5-5-medium',
+    'adaptive',
+    '',
+    null,
+  ]) {
+    assert.equal(isBillableModel(value), true, String(value));
+  }
 });

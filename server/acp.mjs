@@ -6,6 +6,7 @@
 //                       编辑工作区文件）；权限请求经 onPermission 交给 UI 决策；
 //                       工具事件经 onTool 归一化输出。
 // kind = 'discussion' → devin acp --agent-type summarizer（无工具），
+//                       固定免费档模型（不跟随可能付费的全局默认），
 //                       权限一律自动拒绝，不产生原生会话续用。
 // message 一律是给浏览器看的安全中文文案；不带 stderr / 环境信息。
 import { spawn as defaultSpawn } from 'node:child_process';
@@ -27,6 +28,10 @@ const COMMAND_LIMIT = 4000;
 // 会话级配置项（session/set_config_option 的 configId 白名单；
 // '' = 跟随 Devin 全局默认，不下发）
 export const MODEL_CONFIG_KEYS = ['model', 'thought_level', 'speed'];
+// 支线追问（summarizer）固定使用免费档模型：全局默认可能是 Fusion 等
+// 付费模型，而 discussion 不接收会话级 modelConfig。可用环境变量覆盖。
+export const DISCUSSION_MODEL =
+  process.env.DEVIN_DISCUSSION_MODEL || 'swe-2-flash-medium';
 
 // 从 ACP toolCall.rawInput 提取可审计的命令文本（command/cmd，有界）。
 // 只取这两个显式字段，绝不序列化整个 rawInput（可能含密钥/大对象）。
@@ -167,7 +172,9 @@ export function runTurn({
     const promptTimeout = timeouts.prompt ?? PROMPT_TIMEOUT;
     const isWork = kind === 'work';
 
-    const args = isWork ? ['acp'] : ['acp', '--agent-type', 'summarizer'];
+    const args = isWork
+      ? ['acp']
+      : ['acp', '--agent-type', 'summarizer', '--model', DISCUSSION_MODEL];
     const child = spawnImpl('devin', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

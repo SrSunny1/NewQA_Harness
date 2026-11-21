@@ -27,6 +27,11 @@ export const DEFAULT_MODEL_CONFIG = Object.freeze({
 const MODEL_CONFIG_VALUE_LIMIT = 128;
 // 实际生效模型值（conv.effectiveModel / turn.model）的存档上限
 const EFFECTIVE_MODEL_LIMIT = 128;
+// 免费档只有 SWE-2 / SWE-2 Flash 的 medium/high/max 精确 SKU。
+// 不能按「包含 swe-2」判断：Fusion 的 UID 里也有 sidekick-swe-2（副模型
+// 免费、主模型计费），swe-2-*-lightning 也是收费变体；未知值按计费处理。
+const FREE_MODEL = /^swe-2(?:-flash)?-(?:medium|high|max)$/i;
+export const isBillableModel = (value) => !FREE_MODEL.test(String(value || ''));
 
 // 存档里的 modelConfig → 固定三键；非对象/缺省回默认，未知值保留字符串。
 export function asModelConfig(raw) {

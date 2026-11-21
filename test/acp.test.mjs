@@ -2,7 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { runTurn, makePrompt, probeOptions, AcpError } from '../server/acp.mjs';
+import {
+  runTurn,
+  makePrompt,
+  probeOptions,
+  AcpError,
+  DISCUSSION_MODEL,
+} from '../server/acp.mjs';
 import { fakeSpawn, agentScript, workScript, probeScript } from './helpers.mjs';
 
 const BASE = { history: [], question: '测试问题', quote: '' };
@@ -349,7 +355,7 @@ test('work：set_mode 失败 → fail closed', async () => {
   );
 });
 
-test('discussion：spawn 带 --agent-type summarizer，无 sessionId 返回', async () => {
+test('discussion：固定免费档模型，忽略 sessionId，无 sessionId 返回', async () => {
   const spawn = fakeSpawn(agentScript());
   let child;
   const res = await runTurn({
@@ -358,7 +364,16 @@ test('discussion：spawn 带 --agent-type summarizer，无 sessionId 返回', as
     sessionId: 'should-be-ignored',
     spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
   });
-  assert.deepEqual(child.spawnargs, ['devin', 'acp', '--agent-type', 'summarizer']);
+  assert.deepEqual(child.spawnargs, [
+    'devin',
+    'acp',
+    '--agent-type',
+    'summarizer',
+    '--model',
+    DISCUSSION_MODEL,
+  ]);
+  // 默认值必须是免费档精确 SKU（Fusion/lightning 都不允许）
+  assert.match(DISCUSSION_MODEL, /^swe-2(?:-flash)?-(?:medium|high|max)$/);
   assert.equal(res.sessionId, undefined);
   assert.deepEqual(child.calls, ['initialize', 'session/new', 'session/prompt']);
 });

@@ -46,6 +46,7 @@ import {
   makeId,
   DEFAULT_MODEL_CONFIG,
   buildChatBody,
+  isBillableModel,
   MAX_IMAGES,
 } from './model.js';
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
@@ -845,14 +846,15 @@ function WorkspaceBar({ conv, defaultCwd, busy: running, onApply, onBrowse }) {
 }
 
 // 实际生效模型标签：done 事件上报值 → 探测选项命中时显示名称，否则原始值。
-// 非 SWE-2 家族标黄提醒（启发式：免费档只含 SWE-2 系；只是提示，不保证准确）。
+// 只有免费档精确 SKU 不标黄；Fusion（UID 含 sidekick-swe-2）与
+// swe-2-*-lightning 等计费变体都会标黄（判定见 model.js isBillableModel）。
 function EffectiveModelTag({ value, opts }) {
   const options =
     opts.status === 'ok' && Array.isArray(opts.config?.model?.options)
       ? opts.config.model.options
       : [];
   const name = options.find((o) => o.value === value)?.name || value;
-  const billable = !/swe-?2/i.test(value);
+  const billable = isBillableModel(value);
   return (
     <span
       className={`model-eff ${billable ? 'warn' : ''}`}
