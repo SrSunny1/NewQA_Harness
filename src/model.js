@@ -169,20 +169,57 @@ export function historyFor(turns, path) {
   return [...historyFor(turns.slice(0, index + 1), []), ...historyFor(branch.turns, rest)];
 }
 
+// 支线内容折叠进历史：否则主线/原生续聊的 Devin 永远不知道追问过什么。
+// 每个有回合的支线压成一段「[支线追问]」记录；skipId 在进入该支线时
+// 跳过自身（其内容由支线回合另行回放，防重复）。
+function branchDigest(branches, skipId = '') {
+  const parts = [];
+  for (const b of branches || []) {
+    if (b.id === skipId || !b.turns?.length) continue;
+    const qa = b.turns
+      .map((t) => {
+        const inner = branchDigest(t.branches);
+        return `问：${t.question}\n答：${inner ? `${t.answer}\n${inner}` : t.answer}`;
+      })
+      .join('\n');
+    const anchor = String(b.anchor?.quote || '').slice(0, 80);
+    parts.push(`[支线追问] 围绕「${anchor}」\n${qa}`);
+  }
+  return parts.join('\n');
+}
+
+// 主线回合 → 历史条目：assistant 文本尾部附本回合各支线记录。
+function turnEntries(turn, skipBranchId = '') {
+  const d = branchDigest(turn.branches, skipBranchId);
+  return [
+    { role: 'user', text: turn.question },
+    { role: 'assistant', text: d ? `${turn.answer}\n\n${d}` : turn.answer },
+  ];
+}
+
+// 主线原生续聊（session/load 已有主线上下文）要补的上下文：
+// 各回合的支线记录压成独立的 assistant 条目随本轮一起发。
+export function branchContextEntries(turns) {
+  const out = [];
+  for (const t of turns || []) {
+    const d = branchDigest(t.branches);
+    if (d) out.push({ role: 'assistant', text: d });
+  }
+  return out;
+}
+
 // 实际发给后端的历史：在进入每一级支线时，把该支线的选段引用
 // 注入到支线第一个回合的 user 文本里（与当前 envelope 的 selectedText 独立）。
+// 主线与各级前缀回合的支线内容折叠进 assistant 文尾（进入中的支线除外）。
 export function historyForRequest(turns, path) {
   if (!path.length) {
-    return turns.flatMap(({ question, answer }) => [
-      { role: 'user', text: question },
-      { role: 'assistant', text: answer },
-    ]);
+    return turns.flatMap((t) => turnEntries(t));
   }
   const [id, ...rest] = path;
   const index = turns.findIndex((turn) => turn.branches.some((branch) => branch.id === id));
   if (index < 0) throw new Error('Unknown thread');
   const branch = turns[index].branches.find((b) => b.id === id);
-  const head = historyForRequest(turns.slice(0, index + 1), []);
+  const head = turns.slice(0, index + 1).flatMap((t) => turnEntries(t, id));
   const inner = historyForRequest(branch.turns, rest);
   const quote = branch.anchor?.quote;
   if (inner.length && quote) {

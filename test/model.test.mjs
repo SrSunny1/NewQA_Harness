@@ -4,6 +4,7 @@ import {
   createConversation,
   historyFor,
   historyForRequest,
+  branchContextEntries,
   appendTurn,
   addNoteToTurn,
   addBranchToTurn,
@@ -107,6 +108,57 @@ test('historyForRequest 给支线首个提问注入祖先引用', () => {
   assert.match(hist[6].text, /内问/);
   // 宿主回合之后的内容被截掉
   assert.equal(hist.length, 8);
+});
+
+test('historyForRequest 主线回放折叠支线内容为追问记录', () => {
+  const inner = B('inner', A('内引用'), [T('it1', '内问', '内答')]);
+  const outer = B('outer', A('外层引用'), [
+    T('ot1', '外问', '外答', { branches: [inner] }),
+  ]);
+  const turns = [
+    T('t1', '问1', '答1', { branches: [outer] }),
+    T('t2', '问2', '答2'),
+  ];
+  const hist = historyForRequest(turns, []);
+  assert.equal(hist.length, 4);
+  assert.equal(hist[0].text, '问1');
+  // 支线记录附在该回合 assistant 文尾，含锚点引用与嵌套支线
+  assert.match(hist[1].text, /^答1/);
+  assert.match(hist[1].text, /\[支线追问\] 围绕「外层引用」/);
+  assert.match(hist[1].text, /问：外问/);
+  assert.match(hist[1].text, /答：外答/);
+  assert.match(hist[1].text, /围绕「内引用」/); // 嵌套支线也折叠
+  assert.equal(hist[2].text, '问2');
+  assert.equal(hist[3].text, '答2');
+});
+
+test('historyForRequest 进入支线时前缀跳过自身、保留兄弟支线记录', () => {
+  const b1 = B('b1', A('引用一'), [T('bt1', '支问1', '支答1')]);
+  const b2 = B('b2', A('引用二'), [T('bt2', '兄弟问', '兄弟答')]);
+  const turns = [T('t1', '问1', '答1', { branches: [b1, b2] })];
+  const hist = historyForRequest(turns, ['b1']);
+  // 前缀：主线回合 + 兄弟支线 b2 记录，不含 b1 自身记录（其回合另行回放）
+  assert.equal(hist[0].text, '问1');
+  assert.match(hist[1].text, /围绕「引用二」/);
+  assert.ok(!/围绕「引用一」/.test(hist[1].text), '进入的支线不在前缀里重复');
+  assert.match(hist[2].text, /\[引用选段\] 引用一/);
+  assert.match(hist[2].text, /支问1/);
+});
+
+test('branchContextEntries：原生续聊只补支线记录', () => {
+  const turns = [
+    T('t1', '问1', '答1', {
+      branches: [B('b1', A('引用一'), [T('bt1', '支问', '支答')])],
+    }),
+    T('t2', '问2', '答2'), // 无支线 → 无条目
+  ];
+  const entries = branchContextEntries(turns);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].role, 'assistant');
+  assert.match(entries[0].text, /\[支线追问\] 围绕「引用一」/);
+  assert.match(entries[0].text, /问：支问/);
+  assert.equal(branchContextEntries([]).length, 0);
+  assert.equal(branchContextEntries([T('x', 'q', 'a')]).length, 0);
 });
 
 test('不可变更新保留无关数据', () => {

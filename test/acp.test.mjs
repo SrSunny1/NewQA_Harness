@@ -304,17 +304,18 @@ test('work：方法顺序 initialize→new→set_mode→prompt，返回 sessionI
   assert.equal(setMode.params.sessionId, 'sid-1');
 });
 
-test('work + sessionId：session/load 原生续聊，不回放历史，回放更新不上屏', async () => {
+test('work + sessionId：session/load 原生续聊，空历史直发、支线记录走 envelope', async () => {
   let promptText = null;
   const spawn = fakeSpawn(
     workScript({ onPrompt: (msg) => (promptText = msg.params.prompt[0].text) }),
   );
   let child;
+  // 无支线时 history=[]（主线原生会话已有）→ 原样发问题
   const res = await runTurn({
     ...BASE,
     kind: 'work',
     sessionId: 'old-session',
-    history: [{ role: 'user', text: '旧问' }],
+    history: [],
     question: '新问',
     spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
   });
@@ -325,8 +326,20 @@ test('work + sessionId：session/load 原生续聊，不回放历史，回放更
     'session/prompt',
   ]);
   assert.equal(res.sessionId, 'old-session');
-  assert.equal(promptText, '新问', '原生续聊直接发问题，不打 JSON envelope');
+  assert.equal(promptText, '新问', '原生续聊空历史直接发问题');
   assert.equal(res.text, '答', 'load 回放的旧内容不进回答');
+  // 有支线时 history=支线记录 → JSON envelope 一起发
+  const res2 = await runTurn({
+    ...BASE,
+    kind: 'work',
+    sessionId: 'old-session',
+    history: [{ role: 'assistant', text: '[支线追问] 围绕「x」\n问：a\n答：b' }],
+    question: '再问',
+    spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+  });
+  assert.ok(promptText.startsWith('Continue this conversation.'), '支线记录走 envelope');
+  assert.match(promptText, /支线追问/);
+  assert.equal(res2.sessionId, 'old-session');
 });
 
 test('work：session/load 失败 → 可见错误，不偷换新会话', async () => {

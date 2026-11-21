@@ -28,6 +28,7 @@ import {
   createBranch,
   titleFromQuestion,
   historyForRequest,
+  branchContextEntries,
   appendTurn,
   addBranchToTurn,
   addNoteToTurn,
@@ -2502,8 +2503,12 @@ export default function App() {
     const kind = path.length ? 'discussion' : 'work';
     let history;
     try {
-      // 原生续聊（work + 已有 sessionId）不回放历史：Devin 侧已有上下文。
-      history = kind === 'work' && c.sessionId ? [] : historyForRequest(c.turns, path);
+      // 原生续聊（work + 已有 sessionId）不回放主线（Devin 侧已有），
+      // 但支线内容原生会话没有——只补支线记录；无支线时仍是空历史。
+      history =
+        kind === 'work' && c.sessionId
+          ? branchContextEntries(c.turns)
+          : historyForRequest(c.turns, path);
     } catch {
       setNotice({ kind: 'error', text: '无法定位该支线上下文' });
       return;

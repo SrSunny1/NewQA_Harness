@@ -510,11 +510,9 @@ export function runTurn({
           );
         }
       }
-      // 原生续聊不做历史回放（Devin 侧已有上下文）；新会话按现有 envelope 回放。
-      const resumed = isWork && typeof sessionId === 'string' && sessionId;
-      const promptText = resumed
-        ? makePrompt({ history: [], question, quote })
-        : makePrompt({ history, question, quote });
+      // 回放内容完全由调用侧决定：新会话=完整历史（支线已折叠入各回合），
+      // 原生续聊=仅支线补充记录（主线 Devin 侧已有）；无支线时为空历史。
+      const promptText = makePrompt({ history, question, quote });
       promptActive = true;
       const promptBlocks = [
         { type: 'text', text: promptText },
