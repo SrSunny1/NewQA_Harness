@@ -104,6 +104,20 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   `/api/chat` 只接受 `model`/`thought_level`/`speed` 三键、≤128 字符串，
   其余一律 400。
 
+## 实际模型
+
+- 每个 work 回合的 done 事件携带**本轮实际生效的模型**：模型取
+  `configOptions` 中 `model` 项的 `currentValue`，按
+  `session/new`/`session/load` 响应 → 每次 `set_config_option` 响应 →
+  回合内 `config_option_update` 通知的顺序取最新值。
+- 「对话设置」模型行右侧显示 `实际：{名称}`（探测选项命中时显示名称，
+  否则原值）；该值同时持久化到会话 `effectiveModel` 与回合 `turn.model`。
+- **旧会话续聊沿用其存储模型**：`session/load` 回来的 `configOptions`
+  记录的可能是当初选的模型，而非当前账号默认值。想换模型用下拉覆盖，
+  下一回合生效。
+- `实际：` 值不匹配 `/swe-?2/i` 时标黄提醒「此模型不在免费档（计费）」——
+  **只是启发式提示**，SWE-2 家族走正常 muted 色，不保证计费判断准确。
+
 ## 标注 / 支线 / 导航
 
 - 划词弹出「四色标注 / 添加备注 / 追问」：色块只做高亮（无内联卡片），

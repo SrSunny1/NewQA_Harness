@@ -95,6 +95,42 @@ function normalizeTool(u) {
   };
 }
 
+// ---- 模型透明度：每轮实际生效模型 ----
+
+const MODEL_VALUE_LIMIT = 128;
+
+// configOptions 数组里 model 条目的 currentValue（非空字符串 ≤128）。
+function configListModel(configOptions) {
+  if (!Array.isArray(configOptions)) return null;
+  const hit = configOptions.find((o) => o && o.id === 'model');
+  const v = hit?.currentValue;
+  return typeof v === 'string' && v ? v.slice(0, MODEL_VALUE_LIMIT) : null;
+}
+
+// session/new|session/load / set_config_option 响应里的 model 当前值。
+function responseModel(result) {
+  return configListModel(result?.configOptions);
+}
+
+// config_option_update 通知里的 model 值；字段形状未完全验证，防御性归一：
+// {configOptions:[...]} / {configOption:{id,currentValue|value}} /
+// {configId|id:'model', currentValue|value}。
+function updateModel(u) {
+  if (!u || typeof u !== 'object') return null;
+  const fromList = configListModel(u.configOptions);
+  if (fromList) return fromList;
+  const opt = u.configOption;
+  if (opt && typeof opt === 'object' && (opt.id === 'model' || opt.configId === 'model')) {
+    const v = opt.currentValue ?? opt.value;
+    if (typeof v === 'string' && v) return v.slice(0, MODEL_VALUE_LIMIT);
+  }
+  if ((u.configId ?? u.id) === 'model') {
+    const v = u.currentValue ?? u.value;
+    if (typeof v === 'string' && v) return v.slice(0, MODEL_VALUE_LIMIT);
+  }
+  return null;
+}
+
 const RPC_TIMEOUT = 30_000;
 // session/prompt 的空闲上限：每次流式更新/权限请求都会重置倒计时，
 // agent 等用户做权限决策时不算卡死；不再是回合总时长的硬上限。
@@ -104,7 +140,10 @@ const KILL_GRACE = 3_000;
 // 跑完整一轮：spawn → initialize → session/new|session/load
 // → (work) set_mode accept-edits → session/prompt，
 // 流式回调 onDelta / onTool / onPermission。
-// resolve { text, sessionId }；sessionId 仅 work 且 end_turn 后返回。
+// resolve { text, sessionId, model }；sessionId 仅 work 且 end_turn 后
+// 返回；model = 本轮实际生效模型（configOptions.model.currentValue，按
+// session/new|load → set_config_option 响应 → config_option_update 顺序取
+// 最新）；discussion 与未知时均为 null。
 // images: [{data: base64, mime}] → ACP image content blocks（附在文本块之后）。
 export function runTurn({
   history = [],
@@ -136,6 +175,7 @@ export function runTurn({
     });
 
     let realSessionId = null;
+    let effectiveModel = null; // 本轮实际生效模型（configOptions.model.currentValue）
     let acc = '';
     let fatal = null; // spawn error / premature exit
     let settled = false;
@@ -381,6 +421,10 @@ export function runTurn({
               } catch {}
             }
           }
+        } else if (isWork && u?.sessionUpdate === 'config_option_update') {
+          // 回合中模型被改动（agent 侧/其它客户端）：以最新上报为准
+          const m = updateModel(u);
+          if (m) effectiveModel = m;
         }
       }
     });
@@ -398,11 +442,13 @@ export function runTurn({
       if (isWork && typeof sessionId === 'string' && sessionId) {
         // 原生续聊：加载既有会话；回放更新被 promptActive 闸门挡掉。
         try {
-          await request(
+          const loaded = await request(
             'session/load',
             { sessionId, cwd, mcpServers: [] },
             requestTimeout,
           );
+          // 续聊会话沿用其存储模型（configOptions.model.currentValue）
+          effectiveModel = responseModel(loaded) ?? effectiveModel;
         } catch (e) {
           if (e instanceof AbortError) throw e;
           throw new AcpError(
@@ -412,6 +458,7 @@ export function runTurn({
         realSessionId = sessionId;
       } else {
         const sess = await request('session/new', { cwd, mcpServers: [] }, requestTimeout);
+        if (isWork) effectiveModel = responseModel(sess) ?? effectiveModel;
         realSessionId = sess?.sessionId;
         if (typeof realSessionId !== 'string' || !realSessionId) {
           throw new AcpError('Devin CLI 未返回有效会话');
@@ -424,11 +471,13 @@ export function runTurn({
           const value = modelConfig[configId];
           if (typeof value !== 'string' || !value) continue;
           try {
-            await request(
+            const cfgRes = await request(
               'session/set_config_option',
               { sessionId: realSessionId, configId, value },
               requestTimeout,
             );
+            // 响应带全量 configOptions：以最新 currentValue 为准
+            effectiveModel = responseModel(cfgRes) ?? effectiveModel;
           } catch (e) {
             if (e instanceof AbortError) throw e;
             throw new AcpError(
@@ -478,7 +527,12 @@ export function runTurn({
       if (!acc.trim()) {
         throw new AcpError('回答为空，未保存本轮内容');
       }
-      return { text: acc, sessionId: isWork ? realSessionId : undefined };
+      return {
+        text: acc,
+        sessionId: isWork ? realSessionId : undefined,
+        // 模型透明度：仅 work 回合；未知时保持 null
+        model: effectiveModel,
+      };
     })().then(ok, fail);
   });
 }

@@ -25,6 +25,8 @@ export const DEFAULT_MODEL_CONFIG = Object.freeze({
   speed: '',
 });
 const MODEL_CONFIG_VALUE_LIMIT = 128;
+// 实际生效模型值（conv.effectiveModel / turn.model）的存档上限
+const EFFECTIVE_MODEL_LIMIT = 128;
 
 // 存档里的 modelConfig → 固定三键；非对象/缺省回默认，未知值保留字符串。
 export function asModelConfig(raw) {
@@ -104,16 +106,20 @@ export function createConversation(workspace = '') {
     sessionId: null,
     permissionMode: 'accept-edits',
     modelConfig: { ...DEFAULT_MODEL_CONFIG },
+    effectiveModel: null, // 最近一轮实际生效的模型值（done 事件上报）
   };
 }
 
-// extra 可带 { tools, changes, images }（images = 贴图缩略图 dataURL[]，供气泡展示）
+// extra 可带 { tools, changes, images, model }
+// （images = 贴图缩略图 dataURL[]，供气泡展示；model 为回合实际生效模型）
 export function createTurn(question, answer, extra = {}) {
   const turn = { id: makeId(), question, answer, notes: [], branches: [] };
   if (Array.isArray(extra.tools) && extra.tools.length) turn.tools = extra.tools;
   if (extra.changes && typeof extra.changes === 'object') turn.changes = extra.changes;
   if (Array.isArray(extra.images) && extra.images.length)
     turn.images = extra.images.slice(0, MAX_IMAGES);
+  if (typeof extra.model === 'string' && extra.model)
+    turn.model = extra.model.slice(0, EFFECTIVE_MODEL_LIMIT);
   return turn;
 }
 
@@ -483,6 +489,9 @@ function asTurn(raw) {
         .slice(0, MAX_IMAGES)
     : [];
   if (images.length) turn.images = images;
+  // 回合实际生效模型（done 事件上报；旧档无字段 → 缺省）
+  if (typeof raw.model === 'string' && raw.model)
+    turn.model = raw.model.slice(0, EFFECTIVE_MODEL_LIMIT);
   return turn;
 }
 
@@ -506,6 +515,10 @@ export function parseStored(raw) {
               ? c.permissionMode
               : 'accept-edits',
             modelConfig: asModelConfig(c.modelConfig),
+            effectiveModel:
+              typeof c.effectiveModel === 'string' && c.effectiveModel
+                ? c.effectiveModel.slice(0, EFFECTIVE_MODEL_LIMIT)
+                : null,
           }
         : null,
     )

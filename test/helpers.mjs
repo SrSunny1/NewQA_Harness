@@ -112,6 +112,8 @@ export function agentScript({
 
 // work 假 agent：支持 session/load、session/set_mode、工具与权限通知。
 // 记录 sessionId 供通知用；load 时可回放历史（应被闸门挡掉）。
+// newConfigOptions / loadConfigOptions / setConfigOptions：注入各响应的
+// configOptions（setConfigOptions 可为 (params)=>configOptions 动态计算）。
 export function workScript({
   sessionId = 'work-session',
   chunks = ['答'],
@@ -121,12 +123,19 @@ export function workScript({
   loadError = null,
   onPrompt,
   notifyDuringPrompt,
+  newConfigOptions = null,
+  loadConfigOptions = null,
+  setConfigOptions = null,
 } = {}) {
   return (msg, api) => {
     if (msg.method === 'initialize') {
       api.respond(msg.id, { protocolVersion: 1, agentCapabilities: { loadSession: true } });
     } else if (msg.method === 'session/new') {
-      api.respond(msg.id, { sessionId, modes: { availableModes: [{ id: 'ask' }] } });
+      api.respond(msg.id, {
+        sessionId,
+        modes: { availableModes: [{ id: 'ask' }] },
+        ...(newConfigOptions ? { configOptions: newConfigOptions } : {}),
+      });
     } else if (msg.method === 'session/load') {
       if (loadError) {
         api.respondError(msg.id, { code: -32016, message: 'cannot load session' });
@@ -142,10 +151,16 @@ export function workScript({
           },
         });
       }
-      api.respond(msg.id, {});
+      api.respond(msg.id, loadConfigOptions ? { configOptions: loadConfigOptions } : {});
     } else if (msg.method === 'session/set_config_option') {
       if (setConfigError) api.respondError(msg.id, setConfigError);
-      else api.respond(msg.id, { configOptions: [] });
+      else {
+        const opts =
+          typeof setConfigOptions === 'function'
+            ? setConfigOptions(msg.params)
+            : setConfigOptions || [];
+        api.respond(msg.id, { configOptions: opts });
+      }
     } else if (msg.method === 'session/set_mode') {
       if (setModeError) api.respondError(msg.id, setModeError);
       else api.respond(msg.id, {});

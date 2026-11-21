@@ -564,3 +564,54 @@ test('buildChatBody：work 带 modelConfig，discussion 省略', () => {
   });
   assert.deepEqual(bare.modelConfig, { model: '', thought_level: '', speed: '' });
 });
+
+// ---------- 模型透明度：effectiveModel / turn.model ----------
+
+test('createTurn：extra.model 持久化到回合；非法值忽略', () => {
+  const t = createTurn('q', 'a', { model: 'swe-2-flash-max' });
+  assert.equal(t.model, 'swe-2-flash-max');
+  const bare = createTurn('q', 'a');
+  assert.ok(!('model' in bare), '缺省不产生字段');
+  const bad = createTurn('q', 'a', { model: 42 });
+  assert.ok(!('model' in bad));
+});
+
+test('createConversation：effectiveModel 默认 null', () => {
+  assert.equal(createConversation().effectiveModel, null);
+});
+
+test('parseStored：conv.effectiveModel ≤128 与 turn.model 兼容消毒', () => {
+  const long = 'm'.repeat(200);
+  const s = parseStored(
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        {
+          id: 'a',
+          title: 'x',
+          effectiveModel: 'fusion-gpt-6-2',
+          turns: [
+            {
+              question: 'q',
+              answer: 'a',
+              model: 'm1',
+              usage: { tokens: 5 }, // 旧档用量字段不再保留
+            },
+          ],
+        },
+        { id: 'b', title: 'y', effectiveModel: 7, turns: [{ question: 'q', answer: 'a', model: 42 }] },
+        { id: 'c', title: 'z', effectiveModel: long, turns: [] },
+      ],
+    }),
+  );
+  // conv：字符串生效、非字符串回 null、超长截断 ≤128
+  assert.equal(s.conversations[0].effectiveModel, 'fusion-gpt-6-2');
+  assert.equal(s.conversations[1].effectiveModel, null);
+  assert.equal(s.conversations[2].effectiveModel.length, 128);
+  // turn：model 字符串保留；旧档 usage 字段剔除
+  const turn = s.conversations[0].turns[0];
+  assert.equal(turn.model, 'm1');
+  assert.ok(!('usage' in turn), '旧档 usage 字段不再保留');
+  const bareTurn = s.conversations[1].turns[0];
+  assert.ok(!('model' in bareTurn), '非法值不保留字段');
+});

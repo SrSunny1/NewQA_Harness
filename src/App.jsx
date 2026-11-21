@@ -689,7 +689,9 @@ function TurnView(props) {
       </div>
       {(olderTools.length > 0 || turn.changes) && (
         <details className="changes markup-ui">
-          <summary>{olderTools.length ? '工具与改动' : '改动快照'}</summary>
+          <summary>
+            {olderTools.length ? '工具与改动' : '改动快照'}
+          </summary>
           <ToolList tools={olderTools} />
           <GitView changes={turn.changes} />
         </details>
@@ -842,6 +844,25 @@ function WorkspaceBar({ conv, defaultCwd, busy: running, onApply, onBrowse }) {
   );
 }
 
+// 实际生效模型标签：done 事件上报值 → 探测选项命中时显示名称，否则原始值。
+// 非 SWE-2 家族标黄提醒（启发式：免费档只含 SWE-2 系；只是提示，不保证准确）。
+function EffectiveModelTag({ value, opts }) {
+  const options =
+    opts.status === 'ok' && Array.isArray(opts.config?.model?.options)
+      ? opts.config.model.options
+      : [];
+  const name = options.find((o) => o.value === value)?.name || value;
+  const billable = !/swe-?2/i.test(value);
+  return (
+    <span
+      className={`model-eff ${billable ? 'warn' : ''}`}
+      title={billable ? '此模型不在免费档（计费）' : undefined}
+    >
+      实际：{name}
+    </span>
+  );
+}
+
 // 会话级 模型/思考/速度 下拉（work 会话输入区可见）。
 // '' 值 = 默认，跟随 Devin 全局配置；选择对下一回合生效（回合进行中禁用）。
 // opts 来自 GET /api/devin/options：error → 整行禁用并标「不可用」。
@@ -896,6 +917,7 @@ function ModelBar({ conv, opts, busy, onSelect }) {
           </span>
         );
       })}
+      {!!conv.effectiveModel && <EffectiveModelTag value={conv.effectiveModel} opts={opts} />}
     </div>
   );
 }
@@ -2268,6 +2290,7 @@ export default function App() {
     let toolsAcc = [];
     let changes = null;
     let doneSessionId = null;
+    let doneModel = null; // done 上报的本轮实际生效模型
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -2326,6 +2349,8 @@ export default function App() {
         } else if (ev.type === 'done') {
           finished = true;
           doneSessionId = typeof ev.sessionId === 'string' ? ev.sessionId : null;
+          doneModel =
+            typeof ev.model === 'string' && ev.model ? ev.model.slice(0, 128) : null;
         } else if (ev.type === 'error') {
           streamErr = ev.message || '发生未知错误';
         }
@@ -2353,6 +2378,7 @@ export default function App() {
             tools: toolsAcc,
             changes,
             images: thumbs,
+            model: doneModel,
           });
           return {
             ...c2,
@@ -2362,6 +2388,8 @@ export default function App() {
                 : c2.title,
             sessionId:
               kind === 'work' && doneSessionId ? doneSessionId : c2.sessionId,
+            // 本轮实际生效模型持久化到会话（done 未上报时沿用上次值）
+            effectiveModel: doneModel || c2.effectiveModel || null,
             turns: appendTurn(c2.turns, path, turn),
           };
         }),

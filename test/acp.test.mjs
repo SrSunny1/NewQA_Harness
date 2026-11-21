@@ -782,6 +782,112 @@ test('discussion：modelConfig 被忽略，不发 set_config_option', async () =
   assert.ok(!child.calls.includes('session/set_config_option'));
 });
 
+// ---------- 模型透明度：effectiveModel ----------
+
+test('work：model 取自 session/new 与 set_config_option 响应的 configOptions', async () => {
+  // session/new 上报存储模型；set_config_option 响应回全量 configOptions
+  const spawn = fakeSpawn(
+    workScript({
+      sessionId: 'sid-m',
+      chunks: ['ok'],
+      newConfigOptions: [
+        { id: 'model', currentValue: 'stored-m0', options: [] },
+        { id: 'speed', currentValue: 'standard', options: [] },
+      ],
+      setConfigOptions: (params) => [
+        { id: 'model', currentValue: params.configId === 'model' ? params.value : 'stored-m0' },
+      ],
+    }),
+  );
+  // 无覆盖：用 session/new 上报的模型
+  const res1 = await runTurn({ ...BASE, kind: 'work', spawnImpl: spawn });
+  assert.equal(res1.model, 'stored-m0');
+  // 下发 model=opus-b：以 set_config_option 响应的 currentValue 为准
+  const spawn2 = fakeSpawn(
+    workScript({
+      chunks: ['ok'],
+      newConfigOptions: [{ id: 'model', currentValue: 'stored-m0' }],
+      setConfigOptions: (params) => [
+        { id: 'model', currentValue: params.configId === 'model' ? params.value : 'stored-m0' },
+      ],
+    }),
+  );
+  const res2 = await runTurn({
+    ...BASE,
+    kind: 'work',
+    modelConfig: { model: 'opus-b' },
+    spawnImpl: spawn2,
+  });
+  assert.equal(res2.model, 'opus-b');
+});
+
+test('work：session/load 的 configOptions 给出续聊会话的存储模型', async () => {
+  const spawn = fakeSpawn(
+    workScript({
+      replayOnLoad: false,
+      chunks: ['ok'],
+      loadConfigOptions: [
+        { id: 'model', currentValue: 'fusion-gpt-6-2-sol-high-sidekick-swe-2-high' },
+      ],
+    }),
+  );
+  const res = await runTurn({
+    ...BASE,
+    kind: 'work',
+    sessionId: 'old-session',
+    spawnImpl: spawn,
+  });
+  assert.equal(res.model, 'fusion-gpt-6-2-sol-high-sidekick-swe-2-high');
+});
+
+test('work：config_option_update 覆盖先前来源', async () => {
+  const spawn = fakeSpawn(
+    workScript({
+      sessionId: 'sid-u',
+      chunks: ['好'],
+      newConfigOptions: [{ id: 'model', currentValue: 'm0' }],
+      notifyDuringPrompt: (msg, api) => {
+        const sid = msg.params.sessionId;
+        // configOption 形状：{configOption:{id,currentValue}}
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOption: { id: 'model', currentValue: 'm-live' },
+          },
+        });
+      },
+    }),
+  );
+  const res = await runTurn({ ...BASE, kind: 'work', spawnImpl: spawn });
+  assert.equal(res.model, 'm-live', '回合中的 config_option_update 覆盖 session/new 的值');
+});
+
+test('work：无上报时 model 为 null', async () => {
+  const spawn = fakeSpawn(workScript({ chunks: ['答'] }));
+  const res = await runTurn({ ...BASE, kind: 'work', spawnImpl: spawn });
+  assert.equal(res.model, null);
+});
+
+test('discussion：即使 agent 上报 configOptions 也不返回 model', async () => {
+  const spawn = fakeSpawn(
+    agentScript({
+      chunks: ['答'],
+      extraNotify: [
+        {
+          sessionId: 'fake-session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOption: { id: 'model', currentValue: 'm-live' },
+          },
+        },
+      ],
+    }),
+  );
+  const res = await runTurn({ ...BASE, kind: 'discussion', spawnImpl: spawn });
+  assert.equal(res.model, null);
+});
+
 // ---------- probeOptions（GET /api/devin/options 的探测体） ----------
 
 test('probeOptions：归一化 configOptions（过滤 mode）与 available_commands_update', async () => {

@@ -2072,6 +2072,16 @@ body {
   font-size: 11px;
   white-space: nowrap;
 }
+/* 本轮实际生效模型（done 上报值）：SWE-2 系走 muted，其余标黄提醒计费 */
+.model-eff {
+  margin-left: auto;
+  color: var(--ink-soft);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.model-eff.warn {
+  color: var(--warn-ink);
+}
 .perm-more {
   font-size: 11px;
   color: var(--ink-soft);

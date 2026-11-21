@@ -403,7 +403,12 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
           });
         }
       }
-      send({ type: 'done', sessionId: result.sessionId });
+      // done 透传本轮实际生效模型（discussion/未知时缺省）
+      send({
+        type: 'done',
+        sessionId: result.sessionId,
+        ...(result.model ? { model: result.model } : {}),
+      });
     } catch (e) {
       if (e.name !== 'AbortError' && !controller.signal.aborted && !res.writableEnded) {
         send({

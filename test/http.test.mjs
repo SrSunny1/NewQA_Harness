@@ -299,6 +299,38 @@ test('work 回合 → done 带 sessionId + git 事件', async () => {
   );
 });
 
+test('work done 事件透传 model；无上报时键缺省', async () => {
+  // session/new 上报存储模型
+  const script = workScript({
+    newConfigOptions: [{ id: 'model', currentValue: 'swe-2-flash-max' }],
+  });
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: tmpdir() });
+      assert.equal(res.status, 200);
+      const events = await readEvents(res);
+      const done = events.find((e) => e.type === 'done');
+      assert.equal(done.sessionId, 'work-session');
+      assert.equal(done.model, 'swe-2-flash-max');
+    },
+    { spawnImpl: fakeSpawn(script) },
+  );
+  // agent 未上报 → done 不带 model 键
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: tmpdir() });
+      const events = await readEvents(res);
+      const done = events.find((e) => e.type === 'done');
+      assert.ok(!('model' in done), '无上报时 done 不含 model 键');
+      // discussion 回合同样不带
+      const res2 = await post(base, { ...VALID, kind: 'discussion' });
+      const done2 = (await readEvents(res2)).find((e) => e.type === 'done');
+      assert.ok(!('model' in done2));
+    },
+    { spawnImpl: fakeSpawn(workScript()) },
+  );
+});
+
 test('权限决策：404 过期 / 400 无效选项 / 200 放行', async () => {
   const permScript = (msg, api, child) => {
     if (msg.method === 'initialize') {
