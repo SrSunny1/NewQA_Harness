@@ -391,7 +391,7 @@ const anchor = (sb, so, eb = sb, eo = so + 2) => ({
   startBlock: sb, startOffset: so, endBlock: eb, endOffset: eo, quote: 'q',
 });
 
-test('branchAppearance：父支线与首个嵌套支线不同色；兄弟不同色；深层包裹也不同', () => {
+test('branchAppearance：每个顶层锚点独立起轮，(round-1)%5 父子异色', () => {
   const t = createTurn('q', 'a');
   let turns = appendTurn([], [], t);
   const b1 = createBranch(anchor(0, 0));
@@ -416,14 +416,15 @@ test('branchAppearance：父支线与首个嵌套支线不同色；兄弟不同�
         : b),
   }));
   const ap = branchAppearance(withNested);
-  // b1 是第一个 → tone 0 / #1；b2 兄弟不同色
+  // b1 顶层锚点 → 轮次 1 → tone 0；嵌套支线轮次 2 → tone 1（≠ 父色）
   assert.equal(ap.get(b1.id).number, 1);
   assert.equal(ap.get(b1.id).tone, 0);
-  assert.equal(ap.get(b2.id).number, 3);
-  assert.notEqual(ap.get(b2.id).tone, ap.get(b1.id).tone);
-  // 深度优先：b1→nested(#2)→b2(#3)
   assert.equal(ap.get(nested.id).number, 2);
-  assert.notEqual(ap.get(nested.id).tone, ap.get(b1.id).tone); // 嵌套首个 ≠ 父色
+  assert.equal(ap.get(nested.id).tone, 1);
+  assert.notEqual(ap.get(nested.id).tone, ap.get(b1.id).tone);
+  // b2 是另一个顶层锚点 → 独立计数重回轮次 1 → tone 0（CodeSlice 语义：异树独立）
+  assert.equal(ap.get(b2.id).number, 3);
+  assert.equal(ap.get(b2.id).tone, 0);
 });
 
 test('conversationIndex：同锚点标注排在支线前；嵌套树含嵌套回合/支线/标注', () => {

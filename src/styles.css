@@ -575,7 +575,7 @@ body {
   background: #f9a8d4;
 }
 
-/* 支线五色（参照 CodeSlice：(round-1)%5，蓝/绿/琥珀/玫瑰/薰衣草）；
+/* 支线五色（CodeSlice：每个顶层锚点树内 (round-1)%5，蓝/绿/琥珀/玫瑰/薰衣草）；
    --tone-*-bg 面板底色、--tone-*-b 主色、--tone-*-ink 深色文字/徽标。 */
 :root {
   --tone-0-bg: rgba(96, 165, 250, 0.2);

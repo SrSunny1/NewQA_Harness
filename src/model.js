@@ -333,27 +333,24 @@ export function branchOrdinal(turn, branchId) {
   return orderedBranches(turn).findIndex((b) => b.id === branchId) + 1;
 }
 
-// 整个会话范围的支线编号与色调：深度优先按文档序分配；
-// 相邻兄弟/父子不同色（与父支线、同层前一支线比较），全局只增不减。
+// 支线编号与色调（对齐 CodeSlice threadRoundMap + (round-1)%5）：
+// 每个顶层支线锚点（挂在主线回合上的支线）是独立的一棵树，
+// 树内连同嵌套支线按深度优先文档序从 1 连号，tone = (round-1)%5；
+// 父子/兄弟轮次相邻 → 天然异色；另一个顶层锚点重新从 1 计。
+// number 仍是全局 DFS 序号（支线 #N 的展示编号不变）。
 export function branchAppearance(turns) {
   const result = new Map();
   let nextNumber = 0;
-  let nextTone = 0;
-  function visit(items, parentTone = -1) {
-    let previousTone = -1;
-    for (const turn of items) {
-      for (const branch of orderedBranches(turn)) {
-        let tone;
-        do {
-          tone = nextTone++ % 5;
-        } while (tone === parentTone || tone === previousTone);
-        previousTone = tone;
-        result.set(branch.id, { number: ++nextNumber, tone });
-        visit(branch.turns, tone);
-      }
+  function visitTree(branch, counter) {
+    counter.n += 1;
+    result.set(branch.id, { number: ++nextNumber, tone: (counter.n - 1) % 5 });
+    for (const turn of branch.turns) {
+      for (const b of orderedBranches(turn)) visitTree(b, counter);
     }
   }
-  visit(turns);
+  for (const turn of turns) {
+    for (const branch of orderedBranches(turn)) visitTree(branch, { n: 0 });
+  }
   return result;
 }
 
