@@ -63,6 +63,18 @@ const OPTIONS = {
         { value: 'swe-2-high', name: 'SWE-2' },
         { value: 'opus', name: 'Opus' },
         { value: 'sonnet', name: 'Sonnet' },
+        {
+          value: 'fusion-opus-sidekick-swe-2-high',
+          name: 'Fusion (Opus + SWE-2 High)',
+        },
+        {
+          value: 'fusion-sonnet-sidekick-swe-2-high',
+          name: 'Fusion (Sonnet + SWE-2 High)',
+        },
+        {
+          value: 'fusion-sonnet-sidekick-glm-5-2',
+          name: 'Fusion (Sonnet + GLM-5.2)',
+        },
       ],
     },
     thought_level: {
@@ -315,6 +327,49 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
     { model: 'opus', thought_level: 'low', speed: 'fast' },
     '选择写入会话持久化',
   );
+  // fusion-* 配对不进模型下拉（由 /fusion 选择器负责）
+  const vals = [...m.options].map((o) => o.value);
+  assert.ok(!vals.some((v) => v.startsWith('fusion-')), 'fusion 不在模型下拉');
+});
+
+test('dom：/fusion 弹双列选择器，Tab 切列、Enter 确认写入 modelConfig', async () => {
+  const ta = container.querySelector('#composer-main');
+  await setText(ta, '/fusion');
+  const menu = container.querySelector('.fusion-menu');
+  assert.ok(menu, '/fusion 触发选择器');
+  const cols = menu.querySelectorAll('.fusion-col');
+  assert.equal(cols.length, 2, 'Leader/Sidekick 两列');
+  assert.deepEqual(
+    [...cols[0].querySelectorAll('.fusion-opt')].map((o) => o.textContent),
+    ['Opus', 'Sonnet'],
+  );
+  // 默认焦点 Opus → Sidekick 列只有一项；↓ 切 Sonnet 后刷新为两项
+  assert.equal(cols[1].querySelectorAll('.fusion-opt').length, 1);
+  await key(ta, 'ArrowDown');
+  assert.deepEqual(
+    [...cols[1].querySelectorAll('.fusion-opt')].map((o) => o.textContent),
+    ['SWE-2 High', 'GLM-5.2'],
+  );
+  // Leader 列 Enter → 跳 Sidekick 列（未提交）；再 ↓ 选 GLM-5.2
+  await key(ta, 'Enter');
+  assert.ok(container.querySelector('.fusion-menu'), 'Leader 列回车不提交');
+  await key(ta, 'ArrowDown');
+  await key(ta, 'Enter');
+  assert.ok(!container.querySelector('.fusion-menu'), '确认后选择器关闭');
+  assert.equal(ta.value, '', '“/fusion” token 被剥掉');
+  const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  const conv = stored.conversations.find((c) => c.id === stored.activeId);
+  assert.equal(
+    conv.modelConfig.model,
+    'fusion-sonnet-sidekick-glm-5-2',
+    '配对 uid 写入 modelConfig',
+  );
+  // 当前值不在下拉选项里 → 回退项显示 Fusion 友好名
+  const m = container.querySelector('.model-select');
+  const cur = [...m.options].find((o) => o.value === conv.modelConfig.model);
+  assert.equal(cur?.textContent, 'Fusion (Sonnet + GLM-5.2)');
+  // 恢复后续测试期望的 modelConfig（model='opus'）
+  await select(m, 'opus');
 });
 
 test('dom：work 回合 POST body 携带 modelConfig', async () => {

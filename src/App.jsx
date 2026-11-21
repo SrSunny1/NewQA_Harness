@@ -53,6 +53,7 @@ import {
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
 import {
   isFusionCommand,
+  isFusionValue,
   stripFirstToken,
   parseFusionPairs,
   fusionIndices,
@@ -626,6 +627,20 @@ function Composer({
   );
 }
 
+// ACP tool kind → 中文短徽标；'other' 无信息量不显示。
+const TOOL_KIND_LABEL = Object.freeze({
+  read: '读',
+  edit: '改',
+  delete: '删',
+  move: '移动',
+  search: '搜',
+  execute: '执行',
+  think: '思考',
+  fetch: '抓取',
+  plan: '计划',
+  switch_mode: '切模式',
+});
+
 // 工具记录 + git 快照展示（纯文本，不渲染任何 HTML）。
 function ToolList({ tools }) {
   if (!tools?.length) return null;
@@ -634,9 +649,17 @@ function ToolList({ tools }) {
       {tools.map((t) => (
         <li key={t.id} className="tool-item">
           <span className={`tool-status st-${t.status}`}>{t.status}</span>
-          <span className="tool-kind">{t.kind}</span>
+          {(() => {
+            const kl =
+              TOOL_KIND_LABEL[t.kind] ?? (t.kind && t.kind !== 'other' ? t.kind : '');
+            return kl ? <span className="tool-kind">{kl}</span> : null;
+          })()}
           <span className="tool-title" title={t.title || t.id}>
-            {t.title && !/^call_/i.test(t.title) ? shorten(t.title, 80) : '工具调用'}
+            {t.title && !/^call_/i.test(t.title)
+              ? shorten(t.title, 80)
+              : t.command
+                ? '执行命令'
+                : '工具调用'}
           </span>
           {(t.command || t.output) && (
             <details className="tool-detail">
@@ -1044,6 +1067,10 @@ function ModelBar({ conv, opts, busy, onSelect }) {
       ].map(({ key, label }) => {
         const group = ready ? opts.config?.[key] : null;
         const options = Array.isArray(group?.options) ? group.options : [];
+        // fusion-* 配对改由 /fusion 选择器完成，模型下拉只留普通模型；
+        // 当前值若是 fusion，fallback 选项显示 "Fusion (A + B)" 友好名。
+        const shown =
+          key === 'model' ? options.filter((o) => !isFusionValue(o.value)) : options;
         const cur = typeof cfg[key] === 'string' ? cfg[key] : '';
         const dft =
           options.find((o) => o.value === group?.currentValue)?.name ||
@@ -1062,15 +1089,15 @@ function ModelBar({ conv, opts, busy, onSelect }) {
               <option value="">
                 {ready && dft ? `默认（${shorten(dft, 16)}）` : '默认'}
               </option>
-              {options.map((o) => (
+              {shown.map((o) => (
                 <option key={o.value} value={o.value} title={o.value}>
                   {o.name || o.value}
                   {key === 'speed' && o.value === 'fast' ? '（计费）' : ''}
                 </option>
               ))}
-              {!!cur && !options.some((o) => o.value === cur) && (
+              {!!cur && !shown.some((o) => o.value === cur) && (
                 <option value={cur} title={cur}>
-                  {cur}
+                  {options.find((o) => o.value === cur)?.name || cur}
                 </option>
               )}
             </select>
