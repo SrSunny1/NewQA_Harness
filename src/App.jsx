@@ -2908,7 +2908,7 @@ export default function App() {
 
           {conv && (
             <div className="composer-area">
-              <details className="composer-settings" key={conv.id}>
+              <details className="composer-settings" key={`settings:${conv.id}`}>
                 <summary>
                   对话设置
                   {conv.permissionMode === 'bypass' && (
@@ -2916,7 +2916,7 @@ export default function App() {
                   )}
                 </summary>
                 <WorkspaceBar
-                  key={conv.id}
+                  key={`ws:${conv.id}`}
                   conv={conv}
                   defaultCwd={defaultCwd}
                   busy={busy}
@@ -2977,7 +2977,7 @@ export default function App() {
                 </p>
               </details>
               <Composer
-                key={conv.id}
+                key={`composer:${conv.id}`}
                 value={drafts.main || ''}
                 images={imgs.main || []}
                 onImages={(list) => onImgs('main', list)}
