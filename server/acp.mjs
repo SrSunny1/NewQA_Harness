@@ -31,7 +31,7 @@ export const MODEL_CONFIG_KEYS = ['model', 'thought_level', 'speed'];
 // 支线追问（summarizer）固定使用免费档模型：全局默认可能是 Fusion 等
 // 付费模型，而 discussion 不接收会话级 modelConfig。可用环境变量覆盖。
 export const DISCUSSION_MODEL =
-  process.env.DEVIN_DISCUSSION_MODEL || 'swe-2-flash-medium';
+  process.env.DEVIN_DISCUSSION_MODEL || 'swe-2-flash-max';
 
 // 从 ACP toolCall.rawInput 提取可审计的命令文本（command/cmd，有界）。
 // 只取这两个显式字段，绝不序列化整个 rawInput（可能含密钥/大对象）。

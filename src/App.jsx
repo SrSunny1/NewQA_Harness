@@ -2714,7 +2714,7 @@ export default function App() {
           </button>
         )}
         <div className="brand">
-          NewQA<span className="brand-sub">本地问答笔记</span>
+          NewQA<span className="brand-sub">新一代harness</span>
         </div>
         <div
           className={`cli-status cli-${cli}`}

@@ -1,4 +1,4 @@
-# NewQA · 本地问答笔记
+# NewQA · 新一代harness
 
 跑在本机的问答笔记本，目标是替代日常 `devin` CLI 用法：
 和**当前已登录的 Devin CLI** 对话（ACP stdio 协议），可对回答划词
@@ -27,7 +27,7 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
 | | 主线（底部输入框） | 支线（划词「追问」） |
 | --- | --- | --- |
 | kind | `work` | `discussion` |
-| agent | `devin acp`（默认 agent） | `devin acp --agent-type summarizer --model swe-2-flash-medium`（无工具，固定免费档；`DEVIN_DISCUSSION_MODEL` 可覆盖） |
+| agent | `devin acp`（默认 agent） | `devin acp --agent-type summarizer --model swe-2-flash-max`（无工具，固定免费档；`DEVIN_DISCUSSION_MODEL` 可覆盖） |
 | 会话 | 原生 `session/new` / `session/load` 续聊 | 每轮全新会话，客户端回放上下文 |
 | 上下文 | Devin 侧原生记忆 | JSON envelope：历史 + 引用选段 + 问题 |
 | 工具/权限 | 工具事件上屏 + 权限决策卡片 | 无工具；权限一律自动拒绝 |
@@ -101,7 +101,7 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   服务端在每个 work 回合的 `session/set_mode` **之前**对非空键逐个调
   `session/set_config_option {sessionId, configId, value}`（RPC 失败即终止，
   fail closed，不发 prompt）；discussion 回合忽略该字段，但固定带
-  `--model swe-2-flash-medium`（免费档，可用 `DEVIN_DISCUSSION_MODEL` 覆盖），
+  `--model swe-2-flash-max`（免费档，可用 `DEVIN_DISCUSSION_MODEL` 覆盖），
   不跟随全局默认，避免全局是 Fusion 等付费模型时支线也计费。
   `/api/chat` 只接受 `model`/`thought_level`/`speed` 三键、≤128 字符串，
   其余一律 400。
@@ -192,7 +192,7 @@ npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
   （commands + 三项 config，过滤其余 configId）与 5 分钟缓存/失败不缓存；
   `modelConfig` 三键白名单校验（未知键/非字符串/超长 → 400）。
 - discussion 用 `--agent-type summarizer --model <免费档>`（默认
-  swe-2-flash-medium，可用 `DEVIN_DISCUSSION_MODEL` 覆盖）、忽略 sessionId
+  swe-2-flash-max，可用 `DEVIN_DISCUSSION_MODEL` 覆盖）、忽略 sessionId
   与 modelConfig、权限自动拒绝；Fusion/lightning 计费提示、免费 SKU 判定、
   「免费 SWE-2 + Fast → 400」防线与 Fast 计费标签均有单测覆盖。
 - 工具事件归一化、权限决策全生命周期（无自动批准、404/400）、git fixture
