@@ -641,44 +641,57 @@ const TOOL_KIND_LABEL = Object.freeze({
   switch_mode: '切模式',
 });
 
+// 工具行的信息文字（priority：真实标题 > 命令 > 关联文件 > 输出首行 > 空）。
+// call_*/空 title 视作无标题；输出首行给匿名工具一个内容预览。
+function toolTitle(t) {
+  if (t.title && !/^call_/i.test(t.title)) return shorten(t.title, 80);
+  if (t.command) return `$ ${shorten(t.command, 70)}`;
+  if (t.locations?.length) {
+    const names = t.locations
+      .slice(0, 3)
+      .map((l) => String(l.path).split(/[\\/]/).filter(Boolean).pop() || l.path);
+    return `${names.join('、')}${t.locations.length > 3 ? ' 等' : ''}`;
+  }
+  const line = String(t.output || '')
+    .split('\n')
+    .find((l) => l.trim());
+  return line ? shorten(line.trim(), 50) : '';
+}
+
 // 工具记录 + git 快照展示（纯文本，不渲染任何 HTML）。
 function ToolList({ tools }) {
   if (!tools?.length) return null;
   return (
     <ul className="tool-list markup-ui">
-      {tools.map((t) => (
-        <li key={t.id} className="tool-item">
-          <span className={`tool-status st-${t.status}`}>{t.status}</span>
-          {(() => {
-            const kl =
-              TOOL_KIND_LABEL[t.kind] ?? (t.kind && t.kind !== 'other' ? t.kind : '');
-            return kl ? <span className="tool-kind">{kl}</span> : null;
-          })()}
-          {(() => {
-            const txt =
-              t.title && !/^call_/i.test(t.title)
-                ? shorten(t.title, 80)
-                : t.command
-                  ? '执行命令'
-                  : '';
-            return txt ? (
-              <span className="tool-title" title={t.title || t.id}>
+      {tools.map((t) => {
+        // 标题已显示命令时，摘要不再重复 `$ cmd`
+        const realTitle = !!(t.title && !/^call_/i.test(t.title));
+        const txt = toolTitle(t);
+        const kl = TOOL_KIND_LABEL[t.kind] ?? (t.kind && t.kind !== 'other' ? t.kind : '');
+        return (
+          <li key={t.id} className="tool-item">
+            <span className={`tool-status st-${t.status}`}>{t.status}</span>
+            {kl ? <span className="tool-kind">{kl}</span> : null}
+            {txt ? (
+              <span className="tool-title" title={t.title || t.command || t.id}>
                 {txt}
               </span>
-            ) : null;
-          })()}
-          {(t.command || t.output) && (
-            <details className="tool-detail">
-              <summary>{t.command ? `$ ${shorten(t.command, 90)}` : '查看输出'}</summary>
-              {t.command && <pre className="tool-output">{t.command}</pre>}
-              {t.output && <pre className="tool-output">{t.output}</pre>}
-            </details>
-          )}
-          {!!t.locations?.length && (
-            <span className="tool-loc">{t.locations.map((l) => l.path).join('，')}</span>
-          )}
-        </li>
-      ))}
+            ) : null}
+            {(t.command || t.output) && (
+              <details className="tool-detail">
+                <summary>
+                  {t.command && realTitle ? `$ ${shorten(t.command, 90)}` : '查看输出'}
+                </summary>
+                {t.command && <pre className="tool-output">{t.command}</pre>}
+                {t.output && <pre className="tool-output">{t.output}</pre>}
+              </details>
+            )}
+            {!!t.locations?.length && (
+              <span className="tool-loc">{t.locations.map((l) => l.path).join('，')}</span>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
