@@ -1,0 +1,23 @@
+{
+  "name": "newqa",
+  "private": true,
+  "version": "0.1.0",
+  "description": "NewQA — 与本机 Devin CLI (ACP) 对话、可标注可追问的本地笔记本",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "test": "node --test test/*.test.mjs",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.0",
+    "jsdom": "^31.0.1",
+    "vite": "^6.3.0"
+  }
+}
