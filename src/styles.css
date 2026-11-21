@@ -1059,6 +1059,67 @@ body {
   white-space: nowrap;
   min-width: 0;
 }
+/* /fusion 双列配对选择器：与 slash-menu 同位（贴在输入框上方） */
+.fusion-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+.fusion-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.fusion-col {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  margin: 4px;
+}
+.fusion-col.focus {
+  border-color: var(--accent);
+}
+.fusion-head {
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.fusion-col ul {
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.fusion-opt {
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fusion-opt.on,
+.fusion-opt:hover {
+  background: var(--accent-soft);
+}
+.fusion-foot {
+  padding: 7px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
 .btn-primary {
   margin-left: auto;
   border: 0;

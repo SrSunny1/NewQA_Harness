@@ -51,7 +51,20 @@ import {
   MAX_IMAGES,
 } from './model.js';
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
+import {
+  isFusionCommand,
+  stripFirstToken,
+  parseFusionPairs,
+  fusionIndices,
+} from './fusion.js';
 import './styles.css';
+
+// 探测命令里没有 fusion 时注入的入口（接受后输入变 '/fusion ' → 开选择器）
+const FUSION_CMD = Object.freeze({
+  name: 'fusion',
+  hint: 'Leader+Sidekick',
+  description: '选择 Fusion 模型配对（Tab 切列，Enter 确定）',
+});
 
 const EXAMPLES = [
   '用三句话解释什么是 Agent Client Protocol',
@@ -294,6 +307,9 @@ function Composer({
   onSlashNeed,
   images = [],
   onImages,
+  fusionPairs = null, // parseFusionPairs 结果；提供时 '/fusion' 开配对选择器
+  fusionCurrent = '', // 当前已选 fusion uid（选择器初始焦点）
+  onFusion, // (uid) => void：确认配对后写 modelConfig.model
 }) {
   const composing = useRef(false);
   const taRef = useRef(null);
@@ -303,12 +319,38 @@ function Composer({
   const [activeIdx, setActiveIdx] = useState(0);
   const caretPending = useRef(null);
   const combo = slashCommands !== undefined;
+  // Fusion 选择器：当前焦点列 0=Leader 1=Sidekick，行索引按列各自记录；
+  // fDismissed 同 slash 的 dismissed——Esc 后输入变化才重开。
+  const [fCol, setFCol] = useState(0);
+  const [fLi, setFLi] = useState(0);
+  const [fSi, setFSi] = useState(0);
+  const [fDismissed, setFDismissed] = useState(false);
+
+  const hasFusion = !!fusionPairs?.leaders?.length;
+  const fusionOpen = hasFusion && isFusionCommand(value) && !fDismissed;
+  const fSides =
+    fusionPairs?.sides?.get(fusionPairs.leaders[Math.min(fLi, fusionPairs.leaders.length - 1)]?.key) ||
+    [];
+  const fSide = Math.min(fSi, Math.max(0, fSides.length - 1));
+
+  // 每次打开都按当前已选 uid 归位焦点（未选过 fusion → 0,0）
+  useEffect(() => {
+    if (!fusionOpen) return;
+    const { leaderIdx, sideIdx } = fusionIndices(fusionPairs, fusionCurrent);
+    setFLi(leaderIdx);
+    setFSi(sideIdx);
+    setFCol(0);
+  }, [fusionOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // token 只看输入与 caret（与命令是否已取回无关，用于触发懒取）；
-  // 面板项则等命令数组到手才过滤。
+  // 面板项则等命令数组到手才过滤。探测命令里没有 fusion 时补一条入口。
   const token = combo ? slashToken(value, caret) : null;
-  const items = token && slashCommands ? filterSlashCommands(slashCommands, token.prefix) : [];
-  const slashOpen = !!token && !dismissed && items.length > 0;
+  const cmdList =
+    hasFusion && Array.isArray(slashCommands) && !slashCommands.some((c) => c?.name === 'fusion')
+      ? [...slashCommands, FUSION_CMD]
+      : slashCommands;
+  const items = token && cmdList ? filterSlashCommands(cmdList, token.prefix) : [];
+  const slashOpen = !!token && !dismissed && items.length > 0 && !fusionOpen;
   const active = Math.min(activeIdx, items.length - 1);
 
   useEffect(() => {
@@ -333,6 +375,15 @@ function Composer({
   }, [token, slashCommands, onSlashNeed]);
 
   const syncCaret = (e) => setCaret(e.target.selectionStart ?? 0);
+  // 确认配对：默认取当前列焦点行的 uid；剥掉 '/fusion' 保留其后正文，
+  // caret 归零（经 caretPending → useLayoutEffect 应用）。
+  const fCommit = (uid) => {
+    const pick = uid ?? fSides[fSide]?.uid;
+    if (!pick) return;
+    caretPending.current = 0;
+    onChange(stripFirstToken(value));
+    onFusion?.(pick);
+  };
   const accept = (cmd) => {
     const next = acceptSlash(value, cmd.name);
     caretPending.current = next.caret;
@@ -407,12 +458,13 @@ function Composer({
           rows={1}
           role={combo ? 'combobox' : undefined}
           aria-autocomplete={combo ? 'list' : undefined}
-          aria-expanded={combo ? slashOpen : undefined}
+          aria-expanded={combo ? slashOpen || fusionOpen : undefined}
           aria-controls={slashOpen ? listId : undefined}
           aria-activedescendant={slashOpen ? `${listId}-opt-${active}` : undefined}
           onChange={(e) => {
             setCaret(e.target.selectionStart ?? e.target.value.length);
             setDismissed(false);
+            setFDismissed(false);
             setActiveIdx(0);
             onChange(e.target.value);
           }}
@@ -423,6 +475,36 @@ function Composer({
           onCompositionEnd={() => (composing.current = false)}
           onPaste={onPaste}
           onKeyDown={(e) => {
+            if (fusionOpen) {
+              const len = fCol === 0 ? fusionPairs.leaders.length : fSides.length;
+              const move = (d) =>
+                fCol === 0
+                  ? setFLi((i) => ((i + d) % len + len) % len)
+                  : setFSi((i) => ((i + d) % len + len) % len);
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                move(e.key === 'ArrowDown' ? 1 : -1);
+                return;
+              }
+              if (e.key === 'Tab' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                setFCol((c) => (c ^ 1) & 1);
+                return;
+              }
+              if (e.key === 'Enter' && !composing.current && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                // Leader 列回车 → 跳到 Sidekick；Sidekick 列回车 → 确认
+                if (fCol === 0) setFCol(1);
+                else fCommit();
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                setFDismissed(true);
+                return;
+              }
+            }
             if (slashOpen) {
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
@@ -480,6 +562,56 @@ function Composer({
               </li>
             ))}
           </ul>
+        )}
+        {fusionOpen && (
+          <div className="fusion-menu" role="dialog" aria-label="Fusion 模型配对">
+            <div className="fusion-cols">
+              <div className={`fusion-col ${fCol === 0 ? 'focus' : ''}`}>
+                <div className="fusion-head">Leader</div>
+                <ul role="listbox" aria-label="Leader 模型">
+                  {fusionPairs.leaders.map((l, i) => (
+                    <li
+                      key={l.key}
+                      role="option"
+                      aria-selected={i === fLi}
+                      className={`fusion-opt ${i === fLi ? 'on' : ''}`}
+                      title={l.key}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => setFLi(i)}
+                      onClick={() => {
+                        setFLi(i);
+                        setFCol(1);
+                      }}
+                    >
+                      {l.label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className={`fusion-col ${fCol === 1 ? 'focus' : ''}`}>
+                <div className="fusion-head">Sidekick</div>
+                <ul role="listbox" aria-label="Sidekick 模型">
+                  {fSides.map((s, i) => (
+                    <li
+                      key={s.key}
+                      role="option"
+                      aria-selected={i === fSide}
+                      className={`fusion-opt ${i === fSide ? 'on' : ''}`}
+                      title={s.uid}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => setFSi(i)}
+                      onClick={() => fCommit(s.uid)}
+                    >
+                      {s.label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            <div className="fusion-foot">
+              ↑↓ 选择 · Tab/←→ 切换 Leader/Sidekick · Enter 确定 · Esc 取消
+            </div>
+          </div>
         )}
       </div>
       <div className="composer-foot">
@@ -1835,6 +1967,14 @@ export default function App() {
 
   const conv = store.conversations.find((c) => c.id === store.activeId) || null;
   const busy = !!pending;
+  // Fusion 配对表：探测到的 model 选项里所有 fusion-* 值拆成 Leader×Sidekick。
+  const fusionPairs = useMemo(
+    () =>
+      devinOpts.status === 'ok'
+        ? parseFusionPairs(devinOpts.config?.model?.options)
+        : { leaders: [], sides: new Map() },
+    [devinOpts],
+  );
   const hlSupported =
     typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight === 'function';
 
@@ -3016,6 +3156,18 @@ export default function App() {
                 inputId="composer-main"
                 slashCommands={devinOpts.commands}
                 onSlashNeed={ensureDevinOptions}
+                fusionPairs={fusionPairs}
+                fusionCurrent={conv.modelConfig?.model || ''}
+                onFusion={(uid) =>
+                  mutateConv(conv.id, (c) => ({
+                    ...c,
+                    modelConfig: {
+                      ...DEFAULT_MODEL_CONFIG,
+                      ...(c.modelConfig || {}),
+                      model: uid,
+                    },
+                  }))
+                }
                 autoFocus
               />
             </div>
