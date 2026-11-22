@@ -1,11 +1,15 @@
 // Markdown 渲染：markdown-it，禁用 HTML；远端图片降级为文字标签。
+// mathjax3：$…$/$$…$$ 渲染为内联 SVG（自包含，不依赖外部字体/样式表）。
 import MarkdownIt from 'markdown-it';
+import mathjax3 from 'markdown-it-mathjax3';
 
 export const md = new MarkdownIt({
   html: false,
   linkify: false,
   breaks: false,
 });
+
+md.use(mathjax3);
 
 // 不把 markdown 图片渲染成 <img>（避免加载远程资源），改为文字标签。
 md.renderer.rules.image = (tokens, idx) => {
