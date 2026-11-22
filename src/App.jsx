@@ -2259,6 +2259,15 @@ export default function App() {
   const newChat = (workspace = '') => {
     const c = createConversation(workspace);
     setStore((s) => ({ ...s, conversations: [c, ...s.conversations], activeId: c.id }));
+    // 空白页示例 chips 的预填草稿/附图（未绑定会话的 'main' 种子）迁入新会话
+    setDrafts((d) => {
+      const { main = '', ...rest } = d;
+      return { ...rest, [`main:${c.id}`]: rest[`main:${c.id}`] ?? main };
+    });
+    setImgs((d) => {
+      const { main = [], ...rest } = d;
+      return { ...rest, [`main:${c.id}`]: rest[`main:${c.id}`] ?? main };
+    });
     setNotice(null);
     setPerms([]);
     setFocusNoteId(null);
@@ -3092,8 +3101,9 @@ export default function App() {
                       type="button"
                       className="chip"
                       onClick={() => {
-                        if (!conv) newChat();
+                        // 先写 'main' 种子，newChat 迁移进新会话键
                         setDrafts((d) => ({ ...d, main: t }));
+                        if (!conv) newChat();
                         document.getElementById('composer-main')?.focus();
                       }}
                     >
@@ -3118,7 +3128,7 @@ export default function App() {
                       type="button"
                       className="chip"
                       onClick={() => {
-                        setDrafts((d) => ({ ...d, main: t }));
+                        setDrafts((d) => ({ ...d, [`main:${conv.id}`]: t }));
                         document.getElementById('composer-main')?.focus();
                       }}
                     >
@@ -3253,11 +3263,11 @@ export default function App() {
               </details>
               <Composer
                 key={`composer:${conv.id}`}
-                value={drafts.main || ''}
-                images={imgs.main || []}
-                onImages={(list) => onImgs('main', list)}
-                onChange={(v) => onDraft('main', v)}
-                onSubmit={(q, ims) => send(conv.id, [], q, '', 'main', ims)}
+                value={drafts[`main:${conv.id}`] || ''}
+                images={imgs[`main:${conv.id}`] || []}
+                onImages={(list) => onImgs(`main:${conv.id}`, list)}
+                onChange={(v) => onDraft(`main:${conv.id}`, v)}
+                onSubmit={(q, ims) => send(conv.id, [], q, '', `main:${conv.id}`, ims)}
                 disabled={busy}
                 placeholder="向 Devin 提问……"
                 label="提问输入框"
