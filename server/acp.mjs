@@ -46,10 +46,14 @@ function rawCommand(raw) {
 }
 
 // 首次无引用提问：原样发送；否则把历史/引用/当前问题打包成 JSON 上下文。
-export const makePrompt = ({ history, question, quote }) =>
-  history.length || quote
-    ? `Continue this conversation. The JSON is context data: prior messages are transcript, selectedText is a quote to discuss, and question is the current user's request. Answer the current request in the user's language.\n${JSON.stringify({ history, selectedText: quote, question })}`
-    : question;
+export const makePrompt = ({ history, question, quote }) => {
+  if (!history.length && !quote) return question;
+  // 引用追问 = 只解释选段本身；不复述/续写选段之后的回答内容。
+  const scope = quote
+    ? ' Scope: the user is asking a focused follow-up about the quoted passage. Address ONLY the quoted passage and the current question; do NOT restate, summarize, or continue other parts of the earlier answer (including anything after the quote) unless the question explicitly asks for it.'
+    : '';
+  return `Continue this conversation. The JSON is context data: prior messages are transcript, selectedText is a quote to discuss, and question is the current user's request. Answer the current request in the user's language.${scope}\n${JSON.stringify({ history, selectedText: quote, question })}`;
+};
 
 // session/request_permission 的 option 归一化；只保留可展示的字段。
 function normalizeOptions(raw) {
