@@ -654,9 +654,6 @@ body {
   justify-content: flex-end;
   margin-top: 6px;
 }
-.ctx-actions {
-  margin-top: 8px;
-}
 /* MathJax SVG：宽公式横向滚动不撑破排版 */
 .source-block mjx-container[jax='SVG'] {
   max-width: 100%;

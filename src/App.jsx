@@ -3262,17 +3262,6 @@ export default function App() {
                       ? '全部放行：Devin 可在该工作区执行任意命令、修改文件、访问网络，不会弹窗确认。'
                       : '工作模式下，Devin 可直接编辑工作区内文件；只有 Devin 发出权限请求的动作才会弹窗，不会自动替你批准弹窗。'}
                 </p>
-                <div className="ctx-actions markup-ui">
-                  <button
-                    type="button"
-                    className="mini-btn"
-                    disabled={busy}
-                    title="发送 /context 命令；回复作为普通回合留在记录里，看完可再决定 /compact"
-                    onClick={() => send(conv.id, [], '/context', '', `main:${conv.id}`, [])}
-                  >
-                    查询上下文用量
-                  </button>
-                </div>
               </details>
               <Composer
                 key={`composer:${conv.id}`}
