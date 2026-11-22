@@ -693,6 +693,55 @@ test('dom：速度 Fast 标「计费」，SWE-2 实际模型行也标黄', async
   }
 });
 
+test('dom：流中途断开 → 已生成内容存为不完整回合，问题不丢失', async () => {
+  // 模拟 failed to fetch / 连接中断：有 delta 但流没有 done 就关了
+  let ctrl;
+  const stream = new ReadableStream({
+    start(c) {
+      ctrl = c;
+    },
+  });
+  chatResponder = () =>
+    new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'application/x-ndjson' },
+    });
+  try {
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '断流测试问题');
+    await key(ta, 'Enter');
+    await act(async () => {
+      ctrl.enqueue(enc('{"type":"delta","text":"已生成了一半"}\n'));
+      ctrl.close(); // 无 done 直接结束 → 视为连接中断
+      await tick(50);
+    });
+    const turns = [...container.querySelectorAll('.turn[data-turn]')];
+    const last = turns[turns.length - 1];
+    assert.match(last.querySelector('.turn-q').textContent, /断流测试问题/, '问题保留在回合');
+    assert.match(last.querySelector('.turn-a').textContent, /已生成了一半/, '部分内容保留');
+    assert.match(last.querySelector('.turn-a').textContent, /生成中断/, '有中断标记');
+    assert.ok(!container.querySelector('.pending'), 'pending 卡片已移除');
+    assert.equal(
+      container.querySelector('#composer-main').value,
+      '',
+      '已存回合不再回填输入框',
+    );
+    // 持久化后重挂载仍在（不进历史黑洞）
+    await unmountApp();
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const turns2 = [...container.querySelectorAll('.turn[data-turn]')];
+    assert.match(turns2.at(-1).querySelector('.turn-a').textContent, /已生成了一半/);
+  } finally {
+    chatResponder = null;
+    try {
+      ctrl?.close();
+    } catch {}
+  }
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);

@@ -2678,15 +2678,43 @@ export default function App() {
       setPendings((ps) => ps.filter((p) => p.id !== pid));
       setPerms((ps) => ps.filter((x) => x.pid !== pid));
     } catch (e) {
-      if (e.name === 'AbortError' || controller.signal.aborted) {
+      const aborted = e.name === 'AbortError' || controller.signal.aborted;
+      if (aborted) {
         setNotice({ kind: 'info', text: '已停止生成，未保存本轮内容' });
       } else {
         setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
       }
       setPendings((ps) => ps.filter((p) => p.id !== pid));
       setPerms((ps) => ps.filter((x) => x.pid !== pid));
-      // 失败/停止：输入框已清空，回填原文与附图便于修改后重试
-      if (draftKey) {
+      // 非主动停止且已有流出内容：存为不完整回合，避免问答整段丢失
+      let savedPartial = false;
+      if (!aborted && (acc.trim() || toolsAcc.length)) {
+        savedPartial = true;
+        const partial = createTurn(
+          question,
+          acc.trim()
+            ? `${acc}\n\n（⚠ 生成中断，回答不完整）`
+            : '（⚠ 生成中断，未产生回答内容）',
+          { tools: toolsAcc, changes, images: thumbs, model: doneModel },
+        );
+        setStore((s) => ({
+          ...s,
+          conversations: s.conversations.map((c2) =>
+            c2.id !== convId
+              ? c2
+              : {
+                  ...c2,
+                  title:
+                    !c2.titleCustomized && !path.length && c2.turns.length === 0
+                      ? titleFromQuestion(question)
+                      : c2.title,
+                  turns: appendTurn(c2.turns, path, partial),
+                },
+          ),
+        }));
+      }
+      // 失败/停止且未存部分回合：输入框已清空，回填原文与附图便于修改后重试
+      if (!savedPartial && draftKey) {
         setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
         setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
       }
