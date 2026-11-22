@@ -39,7 +39,8 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Vite 会产出 _ 开头的 chunk（_commonjsHelpers 等），首字符须允许 _ 与 -
+const SAFE_NAME = /^[\w-][\w.-]*$/;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PERMITTED_KINDS = new Set(['allow_once', 'reject_once']);
 // 会话权限模式白名单：只放这三种（ask=只读、plan 不开放选择）

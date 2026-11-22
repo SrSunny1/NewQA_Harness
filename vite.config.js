@@ -9,5 +9,6 @@ export default defineConfig({
     // WSL 访问 /mnt/* Windows 盘时需要轮询才能收到文件变更
     watch: { usePolling: true },
   },
-  build: { outDir: 'dist' },
+  // mathjax3 产物含 top-level await，默认 target(es2020) 编译不过，需 es2022+
+  build: { outDir: 'dist', target: 'es2022' },
 });

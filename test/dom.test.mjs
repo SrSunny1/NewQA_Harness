@@ -742,6 +742,21 @@ test('dom：流中途断开 → 已生成内容存为不完整回合，问题不
   }
 });
 
+test('dom：斜杠命令原文下发（history 不进 envelope）', async () => {
+  const before = chatCalls.length;
+  const ta = container.querySelector('#composer-main');
+  await setText(ta, '/compact');
+  await key(ta, 'Escape'); // 先关命令面板，Enter 才是提交
+  await key(ta, 'Enter');
+  await act(async () => {
+    await tick(40);
+  });
+  const call = chatCalls.at(-1);
+  assert.ok(chatCalls.length > before, '产生了 /api/chat 请求');
+  assert.equal(call.body.question, '/compact', '命令原文下发');
+  assert.deepEqual(call.body.history, [], '命令不打包历史');
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);
