@@ -11,6 +11,33 @@ export const md = new MarkdownIt({
 
 md.use(mathjax3);
 
+// file: 协议放行（markdown-it 默认按危险协议拒解析 → 显示原始 [x](file://%xx) 乱码）。
+// 渲染为非导航文件名片：浏览器本就禁止 http 页打开 file://，做成等宽 chip 更诚实。
+const _validateLink = md.validateLink.bind(md);
+md.validateLink = (url) => /^file:\/\//i.test(url) || _validateLink(url);
+const decodeFileHref = (href) => {
+  try {
+    return decodeURIComponent(href.replace(/^file:\/\//i, ''));
+  } catch {
+    return href;
+  }
+};
+const linkIsFile = [];
+const _linkOpen =
+  md.renderer.rules.link_open || ((t, i, o, e, self) => self.renderToken(t, i, o));
+const _linkClose =
+  md.renderer.rules.link_close || ((t, i, o, e, self) => self.renderToken(t, i, o));
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const href = tokens[idx].attrGet('href') || '';
+  const isFile = /^file:\/\//i.test(href);
+  linkIsFile.push(isFile);
+  if (!isFile) return _linkOpen(tokens, idx, options, env, self);
+  const p = md.utils.escapeHtml(decodeFileHref(href));
+  return `<span class="md-file" title="${p}" data-file="${p}">`;
+};
+md.renderer.rules.link_close = (tokens, idx, options, env, self) =>
+  linkIsFile.pop() ? '</span>' : _linkClose(tokens, idx, options, env, self);
+
 // 不把 markdown 图片渲染成 <img>（避免加载远程资源），改为文字标签。
 md.renderer.rules.image = (tokens, idx) => {
   const alt = tokens[idx].content || '';
@@ -37,6 +64,7 @@ export function splitBlocks(tokens) {
 
 // 返回 [{ html }]，每个元素对应一个 .source-block。
 export function renderBlocks(text) {
+  linkIsFile.length = 0;
   const tokens = md.parse(String(text ?? ''), {});
   return splitBlocks(tokens).map((group) => ({
     html: md.renderer.render(group, md.options, {}),
