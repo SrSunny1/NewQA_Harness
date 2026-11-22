@@ -780,6 +780,38 @@ test('work：modelConfig 对原生续聊（session/load）同样下发', async (
   ]);
 });
 
+test('work：会话无 speed 选项（付费模型）→ speed 跳过不发、回合正常', async () => {
+  // Gemini 等付费模型的 configOptions 没有 speed 项；发 'standard' 会
+  // 被服务端拒绝——应识别为"无法兑现"直接跳过，不阻断回合。
+  const gemOpts = [
+    { id: 'mode', currentValue: 'accept-edits', options: [] },
+    {
+      id: 'model',
+      currentValue: 'gemini-4-carbon-medium',
+      options: [{ value: 'gemini-4-carbon-medium' }],
+    },
+    { id: 'thought_level', currentValue: 'medium', options: [{ value: 'medium' }] },
+  ];
+  const spawn = fakeSpawn(
+    workScript({ newConfigOptions: gemOpts, setConfigOptions: gemOpts }),
+  );
+  let child;
+  const res = await runTurn({
+    ...BASE,
+    kind: 'work',
+    modelConfig: { model: 'gemini-4-carbon-medium', thought_level: 'medium', speed: 'standard' },
+    spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+  });
+  const cfgs = child.msgs.filter((m) => m.method === 'session/set_config_option');
+  assert.deepEqual(
+    cfgs.map((m) => m.params.configId),
+    ['model', 'thought_level'],
+    'speed 选项缺失 → 未下发',
+  );
+  assert.equal(res.text, '答');
+  assert.deepEqual(child.calls.at(-1), 'session/prompt');
+});
+
 test('work：set_config_option RPC 错误 → fail closed，不发 prompt', async () => {
   const spawn = fakeSpawn(
     workScript({ setConfigError: { code: -32602, message: 'bad config value' } }),

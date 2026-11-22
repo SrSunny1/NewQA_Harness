@@ -450,6 +450,7 @@ export function runTurn({
       if (init?.protocolVersion !== 1) {
         throw new AcpError('Devin CLI 的 ACP 协议版本不兼容');
       }
+      let cfgOptions = null; // 会话最新 configOptions（模型相关选项随模型动态增减）
       if (isWork && typeof sessionId === 'string' && sessionId) {
         // 原生续聊：加载既有会话；回放更新被 promptActive 闸门挡掉。
         try {
@@ -459,6 +460,7 @@ export function runTurn({
             requestTimeout,
           );
           // 续聊会话沿用其存储模型（configOptions.model.currentValue）
+          cfgOptions = loaded?.configOptions ?? cfgOptions;
           effectiveModel = responseModel(loaded) ?? effectiveModel;
         } catch (e) {
           if (e instanceof AbortError) throw e;
@@ -469,7 +471,10 @@ export function runTurn({
         realSessionId = sessionId;
       } else {
         const sess = await request('session/new', { cwd, mcpServers: [] }, requestTimeout);
-        if (isWork) effectiveModel = responseModel(sess) ?? effectiveModel;
+        if (isWork) {
+          cfgOptions = sess?.configOptions ?? cfgOptions;
+          effectiveModel = responseModel(sess) ?? effectiveModel;
+        }
         realSessionId = sess?.sessionId;
         if (typeof realSessionId !== 'string' || !realSessionId) {
           throw new AcpError('Devin CLI 未返回有效会话');
@@ -481,6 +486,22 @@ export function runTurn({
         for (const configId of MODEL_CONFIG_KEYS) {
           const value = modelConfig[configId];
           if (typeof value !== 'string' || !value) continue;
+          // 该会话不暴露此选项（付费模型无 speed 项）→ 无法兑现，跳过不发；
+          // 选项存在但值不在列表 → 仍报错（fail closed，防静默错配）。
+          // 空/缺失 configOptions 视为未知 → 照常下发，由服务端裁决。
+          const optsKnown = Array.isArray(cfgOptions) && cfgOptions.length > 0;
+          const opt = optsKnown
+            ? cfgOptions.find((o) => (o.id ?? o.configId) === configId)
+            : undefined;
+          if (optsKnown && !opt) continue;
+          if (
+            configId === 'speed' &&
+            Array.isArray(opt?.options) &&
+            opt.options.length &&
+            !opt.options.some((o) => o.value === value)
+          ) {
+            continue;
+          }
           try {
             const cfgRes = await request(
               'session/set_config_option',
@@ -488,6 +509,7 @@ export function runTurn({
               requestTimeout,
             );
             // 响应带全量 configOptions：以最新 currentValue 为准
+            cfgOptions = cfgRes?.configOptions ?? cfgOptions;
             effectiveModel = responseModel(cfgRes) ?? effectiveModel;
           } catch (e) {
             if (e instanceof AbortError) throw e;
