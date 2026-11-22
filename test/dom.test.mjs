@@ -757,6 +757,28 @@ test('dom：斜杠命令原文下发（history 不进 envelope）', async () => 
   assert.deepEqual(call.body.history, [], '命令不打包历史');
 });
 
+test('dom：左栏搜索过滤会话、Esc 清空，且对话设置展示摘要', async () => {
+  const sum = container.querySelector('.composer-settings > summary .settings-summary');
+  assert.ok(sum, '对话设置摘要存在');
+  assert.match(sum.textContent, /·/);
+
+  const search = container.querySelector('.sidebar-search-input');
+  assert.ok(search, '左栏搜索框存在');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(
+      search,
+      '不可能匹配的词xyz',
+    );
+    search.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  assert.ok(
+    container.textContent.includes('未找到匹配的会话或工作区'),
+    '无匹配时显示空提示',
+  );
+  await key(search, 'Escape');
+  assert.equal(search.value, '', 'Esc 清空搜索');
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);

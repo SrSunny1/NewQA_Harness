@@ -1452,8 +1452,36 @@ function MarkRail({ marks, transcriptRef, onJump }) {
 const baseName = (p) => p.split('/').filter(Boolean).pop() || p;
 const UNGROUPED_KEY = '__ungrouped__';
 
-function ConvList({ items, activeId, onSwitch, onRename, onDeleteRequest, busyConvIds = [] }) {
-  const [menuFor, setMenuFor] = useState(null);
+function FolderIcon() {
+  return (
+    <svg
+      className="ws-ico"
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1.75 3.5A1.25 1.25 0 0 1 3 2.25h3.1l1.4 1.5H13A1.25 1.25 0 0 1 14.25 5v7.5A1.25 1.25 0 0 1 13 13.75H3A1.25 1.25 0 0 1 1.75 12.5v-9z" />
+    </svg>
+  );
+}
+
+function ConvList({
+  items,
+  activeId,
+  onSwitch,
+  onRename,
+  onDeleteRequest,
+  busyConvIds = [],
+  openMenu,
+  onToggleMenu,
+  onCloseMenu,
+}) {
   const [renaming, setRenaming] = useState(null);
   const [renameVal, setRenameVal] = useState('');
 
@@ -1466,88 +1494,93 @@ function ConvList({ items, activeId, onSwitch, onRename, onDeleteRequest, busyCo
 
   return (
     <ul className="conv-list">
-      {items.map((c) => (
-        <li key={c.id} className="conv-row">
-          {renaming === c.id ? (
-            <span className="conv-rename" role="form" aria-label="重命名会话">
-              <input
-                className="ws-input"
-                aria-label="新会话名"
-                maxLength={80}
-                value={renameVal}
-                autoFocus
-                onChange={(e) => setRenameVal(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') commitRename(c.id);
-                  if (e.key === 'Escape') setRenaming(null);
-                }}
-              />
-              <button
-                type="button"
-                className="mini-btn"
-                disabled={!renameVal.trim()}
-                onClick={() => commitRename(c.id)}
-              >
-                保存
-              </button>
-              <button type="button" className="mini-btn" onClick={() => setRenaming(null)}>
-                取消
-              </button>
-            </span>
-          ) : (
-            <>
-              <button
-                type="button"
-                className={`conv-item ${c.id === activeId ? 'active' : ''}`}
-                onClick={() => onSwitch(c.id)}
-              >
-                <span className="conv-title">{c.title}</span>
-                <span className="conv-meta">{c.turns.length} 条</span>
-              </button>
-              <button
-                type="button"
-                className="conv-menu-btn"
-                aria-label={`会话「${c.title}」的操作`}
-                aria-haspopup="menu"
-                aria-expanded={menuFor === c.id}
-                onClick={() => setMenuFor(menuFor === c.id ? null : c.id)}
-              >
-                ⋯
-              </button>
-              {menuFor === c.id && (
-                <div className="conv-menu" role="menu" aria-label={`会话「${c.title}」`}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuFor(null);
-                      setRenaming(c.id);
-                      setRenameVal(c.title);
-                    }}
-                  >
-                    重命名
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="danger"
-                    disabled={busyConvIds.includes(c.id)}
-                    title={
-                      busyConvIds.includes(c.id) ? '该对话正在生成回答，请先停止' : undefined
-                    }
-                    onClick={() => {
-                      setMenuFor(null);
-                      onDeleteRequest(c);
-                    }}
-                  >
-                    删除对话
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </li>
-      ))}
+      {items.map((c) => {
+        const isBusy = busyConvIds.includes(c.id);
+        const menuOpen = openMenu?.kind === 'conv' && openMenu.id === c.id;
+        return (
+          <li key={c.id} className="conv-row">
+            {renaming === c.id ? (
+              <span className="conv-rename" role="form" aria-label="重命名会话">
+                <input
+                  className="ws-input"
+                  aria-label="新会话名"
+                  maxLength={80}
+                  value={renameVal}
+                  autoFocus
+                  onChange={(e) => setRenameVal(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename(c.id);
+                    if (e.key === 'Escape') setRenaming(null);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="mini-btn"
+                  disabled={!renameVal.trim()}
+                  onClick={() => commitRename(c.id)}
+                >
+                  保存
+                </button>
+                <button type="button" className="mini-btn" onClick={() => setRenaming(null)}>
+                  取消
+                </button>
+              </span>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className={`conv-item ${c.id === activeId ? 'active' : ''}`}
+                  onClick={() => onSwitch(c.id)}
+                >
+                  {isBusy && (
+                    <span className="busy-dot" aria-label="生成中" title="正在生成回答" />
+                  )}
+                  <span className="conv-title">{c.title}</span>
+                  <span className="conv-meta">{c.turns.length} 条</span>
+                </button>
+                <button
+                  type="button"
+                  className="conv-menu-btn"
+                  aria-label={`会话「${c.title}」的操作`}
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  onClick={() => onToggleMenu('conv', c.id)}
+                >
+                  ⋯
+                </button>
+                {menuOpen && (
+                  <div className="conv-menu" role="menu" aria-label={`会话「${c.title}」`}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        onCloseMenu();
+                        setRenaming(c.id);
+                        setRenameVal(c.title);
+                      }}
+                    >
+                      重命名
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      disabled={isBusy}
+                      title={isBusy ? '该对话正在生成回答，请先停止' : undefined}
+                      onClick={() => {
+                        onCloseMenu();
+                        onDeleteRequest(c);
+                      }}
+                    >
+                      删除对话
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </li>
+        );
+      })}
       {items.length === 0 && <li className="conv-empty">暂无对话</li>}
     </ul>
   );
@@ -1570,20 +1603,86 @@ function Sidebar(props) {
     onRenameWs,
     onDeleteWsRequest,
   } = props;
-  const ungrouped = conversations.filter((c) => !c.workspace);
-  const listProps = { activeId, onSwitch, onRename, onDeleteRequest, busyConvIds };
-  const [wsMenuFor, setWsMenuFor] = useState(null);
+  const [query, setQuery] = useState('');
+  const [openMenu, setOpenMenu] = useState(null);
   const [renamingWs, setRenamingWs] = useState(null);
   const [wsRenameVal, setWsRenameVal] = useState('');
   const wsName = (ws) => wsNames[ws] || baseName(ws);
+
+  const toggleMenu = useCallback((kind, id) => {
+    setOpenMenu((cur) => (cur?.kind === kind && cur.id === id ? null : { kind, id }));
+  }, []);
+  const closeMenu = useCallback(() => setOpenMenu(null), []);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDown = (e) => {
+      if (e.target.closest?.('.conv-menu, .conv-menu-btn')) return;
+      setOpenMenu(null);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setOpenMenu(null);
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenu]);
+
+  const q = query.trim().toLowerCase();
+  const ungroupedAll = conversations.filter((c) => !c.workspace);
+  const ungrouped = q
+    ? ungroupedAll.filter((c) => c.title.toLowerCase().includes(q))
+    : ungroupedAll;
+  const listProps = {
+    activeId,
+    onSwitch,
+    onRename,
+    onDeleteRequest,
+    busyConvIds,
+    openMenu,
+    onToggleMenu: toggleMenu,
+    onCloseMenu: closeMenu,
+  };
 
   const commitWsRename = (ws) => {
     onRenameWs(ws, wsRenameVal.trim().slice(0, 80));
     setRenamingWs(null);
   };
 
+  let visibleWsCount = 0;
+
   return (
     <>
+      <div className="sidebar-search">
+        <input
+          type="search"
+          className="sidebar-search-input"
+          aria-label="搜索工作区或会话"
+          placeholder="搜索工作区或会话…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape' && query) {
+              e.stopPropagation();
+              setQuery('');
+            }
+          }}
+        />
+        {query && (
+          <button
+            type="button"
+            className="sidebar-search-clear"
+            aria-label="清空搜索"
+            onClick={() => setQuery('')}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
       <div className="ws-groups">
         <div className="ws-groups-head">
           <span className="ws-groups-title">工作区</span>
@@ -1599,8 +1698,14 @@ function Sidebar(props) {
         </div>
 
         {workspaces.map((ws) => {
-          const items = conversations.filter((c) => c.workspace === ws);
-          const collapsed = collapsedKeys.includes(ws);
+          const allItems = conversations.filter((c) => c.workspace === ws);
+          const wsHit = q && (wsName(ws).toLowerCase().includes(q) || ws.toLowerCase().includes(q));
+          const items = q && !wsHit ? allItems.filter((c) => c.title.toLowerCase().includes(q)) : allItems;
+          if (q && !wsHit && items.length === 0) return null;
+          visibleWsCount++;
+          const collapsed = q ? false : collapsedKeys.includes(ws);
+          const hasBusy = allItems.some((c) => busyConvIds.includes(c.id));
+          const wsMenuOpen = openMenu?.kind === 'ws' && openMenu.id === ws;
           return (
             <section className="ws-group" key={ws} data-ws={ws}>
               <div className="ws-group-head">
@@ -1641,12 +1746,15 @@ function Sidebar(props) {
                       className="ws-group-toggle"
                       aria-expanded={!collapsed}
                       title={ws}
-                      aria-label={`工作区 ${wsName(ws)}，${items.length} 个会话`}
+                      aria-label={`工作区 ${wsName(ws)}，${allItems.length} 个会话`}
                       onClick={() => onToggleGroup(ws)}
                     >
                       <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-                      <span aria-hidden="true">📁</span>
+                      <FolderIcon />
                       <span className="ws-group-name">{wsName(ws)}</span>
+                      {hasBusy && (
+                        <span className="busy-dot" aria-label="有会话正在生成" title="有会话正在生成" />
+                      )}
                     </button>
                     <button
                       type="button"
@@ -1662,12 +1770,12 @@ function Sidebar(props) {
                       className="conv-menu-btn"
                       aria-label={`工作区「${wsName(ws)}」的操作`}
                       aria-haspopup="menu"
-                      aria-expanded={wsMenuFor === ws}
-                      onClick={() => setWsMenuFor(wsMenuFor === ws ? null : ws)}
+                      aria-expanded={wsMenuOpen}
+                      onClick={() => toggleMenu('ws', ws)}
                     >
                       ⋯
                     </button>
-                    {wsMenuFor === ws && (
+                    {wsMenuOpen && (
                       <div
                         className="conv-menu"
                         role="menu"
@@ -1677,7 +1785,7 @@ function Sidebar(props) {
                           type="button"
                           role="menuitem"
                           onClick={() => {
-                            setWsMenuFor(null);
+                            closeMenu();
                             setRenamingWs(ws);
                             setWsRenameVal(wsNames[ws] || '');
                           }}
@@ -1689,7 +1797,7 @@ function Sidebar(props) {
                           role="menuitem"
                           className="danger"
                           onClick={() => {
-                            setWsMenuFor(null);
+                            closeMenu();
                             onDeleteWsRequest(ws);
                           }}
                         >
@@ -1705,34 +1813,43 @@ function Sidebar(props) {
           );
         })}
 
-        <section className="ws-group" data-ws={UNGROUPED_KEY}>
-          <div className="ws-group-head">
-            <button
-              type="button"
-              className="ws-group-toggle"
-              aria-expanded={!collapsedKeys.includes(UNGROUPED_KEY)}
-              aria-label={`未分组会话，${ungrouped.length} 个会话`}
-              onClick={() => onToggleGroup(UNGROUPED_KEY)}
-            >
-              <span aria-hidden="true">
-                {collapsedKeys.includes(UNGROUPED_KEY) ? '▸' : '▾'}
-              </span>
-              <span className="ws-group-name">未分组</span>
-            </button>
-            <button
-              type="button"
-              className="mini-btn ws-group-new"
-              title="在未分组新建对话"
-              aria-label="在未分组新建对话"
-              onClick={() => onNewChat()}
-            >
-              ＋
-            </button>
-          </div>
-          {!collapsedKeys.includes(UNGROUPED_KEY) && (
-            <ConvList items={ungrouped} {...listProps} />
-          )}
-        </section>
+        {(!q || ungrouped.length > 0) && (
+          <section className="ws-group" data-ws={UNGROUPED_KEY}>
+            <div className="ws-group-head">
+              <button
+                type="button"
+                className="ws-group-toggle"
+                aria-expanded={q ? true : !collapsedKeys.includes(UNGROUPED_KEY)}
+                aria-label={`未分组会话，${ungroupedAll.length} 个会话`}
+                onClick={() => onToggleGroup(UNGROUPED_KEY)}
+              >
+                <span aria-hidden="true">
+                  {(q ? false : collapsedKeys.includes(UNGROUPED_KEY)) ? '▸' : '▾'}
+                </span>
+                <span className="ws-group-name">未分组</span>
+                {ungroupedAll.some((c) => busyConvIds.includes(c.id)) && (
+                  <span className="busy-dot" aria-label="有会话正在生成" title="有会话正在生成" />
+                )}
+              </button>
+              <button
+                type="button"
+                className="mini-btn ws-group-new"
+                title="在未分组新建对话"
+                aria-label="在未分组新建对话"
+                onClick={() => onNewChat()}
+              >
+                ＋
+              </button>
+            </div>
+            {(q || !collapsedKeys.includes(UNGROUPED_KEY)) && (
+              <ConvList items={ungrouped} {...listProps} />
+            )}
+          </section>
+        )}
+
+        {q && visibleWsCount === 0 && ungrouped.length === 0 && (
+          <p className="conv-empty">未找到匹配的会话或工作区</p>
+        )}
       </div>
     </>
   );
@@ -2011,6 +2128,7 @@ export default function App() {
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth : 1280,
   );
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const [picker, setPicker] = useState(null); // { initial, onPick } 文件夹选择器
   const [delConv, setDelConv] = useState(null); // 待确认删除的会话
   const [delWs, setDelWs] = useState(null); // 待确认删除的工作区分组（路径）
@@ -2057,6 +2175,7 @@ export default function App() {
   // 等一小拍让缩略图解码后再滚，避免滚完被撑高。
   const convId = conv?.id ?? null;
   useEffect(() => {
+    setShowScrollDown(false);
     if (!convId) return;
     const t = setTimeout(() => {
       const sc = transcriptRef.current;
@@ -2064,6 +2183,33 @@ export default function App() {
     }, 60);
     return () => clearTimeout(t);
   }, [convId]);
+
+  const onTranscriptScroll = useCallback((e) => {
+    const el = e.currentTarget;
+    setShowScrollDown(el.scrollHeight - el.scrollTop - el.clientHeight > 220);
+  }, []);
+
+  const onTranscriptClick = useCallback((e) => {
+    const btn = e.target.closest?.('.code-copy');
+    if (!btn) return;
+    const wrap = btn.closest('.code-wrap');
+    const code = wrap?.querySelector('pre code, pre')?.textContent ?? '';
+    if (!code) return;
+    navigator.clipboard?.writeText(code).catch(() => {});
+    btn.classList.add('copied');
+    btn.setAttribute('aria-label', '已复制');
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(() => {
+      btn.classList.remove('copied');
+      btn.setAttribute('aria-label', '复制代码');
+    }, 1500);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const sc = transcriptRef.current;
+    if (sc) sc.scrollTop = sc.scrollHeight;
+    setShowScrollDown(false);
+  }, []);
 
   // ---- 布局持久化 ----
   useEffect(() => {
@@ -3091,7 +3237,14 @@ export default function App() {
             </div>
           )}
 
-          <div className="transcript" role="log" aria-label="对话记录" ref={transcriptRef}>
+          <div
+            className="transcript"
+            role="log"
+            aria-label="对话记录"
+            ref={transcriptRef}
+            onScroll={onTranscriptScroll}
+            onClick={onTranscriptClick}
+          >
             {!conv && (
               <section className="blank">
                 <h1 className="blank-title">NewQA</h1>
@@ -3182,6 +3335,18 @@ export default function App() {
             </div>
           )}
 
+          {showScrollDown && conv && (
+            <button
+              type="button"
+              className="scroll-bottom-btn"
+              aria-label="回到底部"
+              title="回到底部"
+              onClick={scrollToBottom}
+            >
+              ↓ 回到底部
+            </button>
+          )}
+
           {perms.length > 0 && (
             <div className="perm-wrap">
               <PermDialog
@@ -3197,10 +3362,35 @@ export default function App() {
             <div className="composer-area">
               <details className="composer-settings" key={`settings:${conv.id}`}>
                 <summary>
-                  对话设置
+                  <span>对话设置</span>
                   {conv.permissionMode === 'bypass' && (
                     <span className="mode-badge">全部放行</span>
                   )}
+                  {(() => {
+                    const mc = conv.modelConfig || {};
+                    const modelVal = mc.model || (devinOpts.status === 'ok' ? devinOpts.config?.model?.currentValue : '') || '';
+                    const modelOpts = devinOpts.status === 'ok' && Array.isArray(devinOpts.config?.model?.options) ? devinOpts.config.model.options : [];
+                    const modelLabel =
+                      modelOpts.find((o) => o.value === modelVal)?.name ||
+                      (isFusionValue(modelVal) ? 'Fusion' : modelVal) ||
+                      '默认模型';
+                    const permLabel =
+                      conv.permissionMode === 'smart'
+                        ? '智能'
+                        : conv.permissionMode === 'bypass'
+                          ? '全部放行'
+                          : '标准';
+                    const wsLabel = conv.workspace
+                      ? (store.wsNames || {})[conv.workspace] || baseName(conv.workspace)
+                      : '默认工作区';
+                    const billable =
+                      isBillableModel(modelVal) || isBillableSpeed(mc.speed || '');
+                    return (
+                      <span className={`settings-summary ${billable ? 'warn' : ''}`}>
+                        {modelLabel} · {permLabel} · {wsLabel}
+                      </span>
+                    );
+                  })()}
                 </summary>
                 <WorkspaceBar
                   key={`ws:${conv.id}`}

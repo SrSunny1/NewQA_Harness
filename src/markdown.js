@@ -38,6 +38,13 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 md.renderer.rules.link_close = (tokens, idx, options, env, self) =>
   linkIsFile.pop() ? '</span>' : _linkClose(tokens, idx, options, env, self);
 
+// 代码块外包一层 .code-wrap + 空文本节点复制按钮（文案由 CSS ::before 提供，
+// 避免污染 .source-block 的 textContent 导致选区/支线锚点偏移错位）。
+const _fence =
+  md.renderer.rules.fence || ((t, i, o, e, self) => self.renderToken(t, i, o));
+md.renderer.rules.fence = (tokens, idx, options, env, self) =>
+  `<div class="code-wrap"><button type="button" class="code-copy" aria-label="复制代码" title="复制代码"></button>${_fence(tokens, idx, options, env, self)}</div>`;
+
 // 不把 markdown 图片渲染成 <img>（避免加载远程资源），改为文字标签。
 md.renderer.rules.image = (tokens, idx) => {
   const alt = tokens[idx].content || '';

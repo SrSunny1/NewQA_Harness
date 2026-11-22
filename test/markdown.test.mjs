@@ -21,3 +21,9 @@ test('普通 https 链接仍是 <a>，裸文本不受影响', () => {
 test('数学公式仍渲染为 mjx-container', () => {
   assert.match(html('行内 $a_b$'), /mjx-container/);
 });
+
+test('代码块外包 .code-wrap 且复制按钮无文本节点（不污染选区偏移）', () => {
+  const h = html('```js\nconst x = 1;\n```');
+  assert.match(h, /class="code-wrap"/);
+  assert.match(h, /<button[^>]*class="code-copy"[^>]*><\/button>/);
+});
