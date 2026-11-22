@@ -881,8 +881,9 @@ function BranchPanel(props) {
   const { branch, path, ap } = props;
   const num = ap?.number ?? '·';
   const bp = useMemo(() => [...path, branch.id], [path, branch.id]);
-  const pendingHere =
-    props.pending && props.pending.convId === props.convId && samePath(props.pending.path, bp);
+  const pendingHere = props.pendings?.find(
+    (p) => p.convId === props.convId && samePath(p.path, bp),
+  );
   const draftKey = `b:${branch.id}`;
   const collapsed = !!branch.collapsed;
   return (
@@ -914,7 +915,12 @@ function BranchPanel(props) {
             {branch.turns.map((t) => (
               <TurnView {...props} key={t.id} turn={t} path={bp} />
             ))}
-            {pendingHere && <PendingView pending={props.pending} onStop={props.onStop} />}
+            {pendingHere && (
+              <PendingView
+                pending={pendingHere}
+                onStop={() => props.onStop(pendingHere.id)}
+              />
+            )}
           </div>
           <Composer
             value={props.drafts[draftKey] || ''}
@@ -929,6 +935,15 @@ function BranchPanel(props) {
             label="支线追问输入框"
             autoFocus={props.focusBranchId === branch.id}
           />
+          <div className="branch-foot">
+            <button
+              type="button"
+              className="mini-btn"
+              onClick={() => props.onCollapse(branch.id, true)}
+            >
+              收起支线 ↑
+            </button>
+          </div>
         </>
       )}
     </section>
@@ -1437,7 +1452,7 @@ function MarkRail({ marks, transcriptRef, onJump }) {
 const baseName = (p) => p.split('/').filter(Boolean).pop() || p;
 const UNGROUPED_KEY = '__ungrouped__';
 
-function ConvList({ items, activeId, onSwitch, onRename, onDeleteRequest, busyConvId }) {
+function ConvList({ items, activeId, onSwitch, onRename, onDeleteRequest, busyConvIds = [] }) {
   const [menuFor, setMenuFor] = useState(null);
   const [renaming, setRenaming] = useState(null);
   const [renameVal, setRenameVal] = useState('');
@@ -1516,9 +1531,9 @@ function ConvList({ items, activeId, onSwitch, onRename, onDeleteRequest, busyCo
                     type="button"
                     role="menuitem"
                     className="danger"
-                    disabled={busyConvId === c.id}
+                    disabled={busyConvIds.includes(c.id)}
                     title={
-                      busyConvId === c.id ? '该对话正在生成回答，请先停止' : undefined
+                      busyConvIds.includes(c.id) ? '该对话正在生成回答，请先停止' : undefined
                     }
                     onClick={() => {
                       setMenuFor(null);
@@ -1550,13 +1565,13 @@ function Sidebar(props) {
     onRename,
     onDeleteRequest,
     onBrowseWs,
-    busyConvId,
+    busyConvIds,
     onToggleGroup,
     onRenameWs,
     onDeleteWsRequest,
   } = props;
   const ungrouped = conversations.filter((c) => !c.workspace);
-  const listProps = { activeId, onSwitch, onRename, onDeleteRequest, busyConvId };
+  const listProps = { activeId, onSwitch, onRename, onDeleteRequest, busyConvIds };
   const [wsMenuFor, setWsMenuFor] = useState(null);
   const [renamingWs, setRenamingWs] = useState(null);
   const [wsRenameVal, setWsRenameVal] = useState('');
@@ -1981,7 +1996,7 @@ export default function App() {
   const [saveError, setSaveError] = useState(null);
   const [drafts, setDrafts] = useState({ main: '' });
   const [imgs, setImgs] = useState({}); // draftKey → [{data,mime,thumb}] 粘贴附图
-  const [pending, setPending] = useState(null);
+  const [pendings, setPendings] = useState([]); // 各对话可并行：进行中回合列表
   const [perms, setPerms] = useState([]);
   const [notice, setNotice] = useState(null);
   const [selBar, setSelBar] = useState(null);
@@ -2005,7 +2020,7 @@ export default function App() {
   // /api/devin/options 懒取结果：idle → loading → ok | error（失败静默不可用）
   const [devinOpts, setDevinOpts] = useState({ status: 'idle', commands: null, config: null });
   const optsRequested = useRef(false);
-  const abortRef = useRef(null);
+  const abortsRef = useRef(new Map()); // pid → { controller, convId }
   const liveRangeRef = useRef(null);
   const hlRef = useRef({});
   const transcriptRef = useRef(null);
@@ -2013,7 +2028,8 @@ export default function App() {
   storeRef.current = store;
 
   const conv = store.conversations.find((c) => c.id === store.activeId) || null;
-  const busy = !!pending;
+  // 会话级忙碌：本对话有回合在跑 → 禁用本对话控件；其它对话不受影响。
+  const busy = !!conv && pendings.some((p) => p.convId === conv.id);
   // Fusion 配对表：探测到的 model 选项里所有 fusion-* 值拆成 Leader×Sidekick。
   const fusionPairs = useMemo(
     () =>
@@ -2494,9 +2510,12 @@ export default function App() {
 
   // ---- 发送 ----
   const send = useCallback(async (convId, path, question, quote, draftKey, images = []) => {
-    if (abortRef.current) {
-      setNotice({ kind: 'info', text: '已有进行中的提问，请先停止或等待完成' });
-      return;
+    // 同一会话仍串行（一个 Devin 会话不能并发 prompt）；不同会话放行。
+    for (const v of abortsRef.current.values()) {
+      if (v.convId === convId) {
+        setNotice({ kind: 'info', text: '该对话已有进行中的回合，请先停止或等待完成' });
+        return;
+      }
     }
     const c = storeRef.current.conversations.find((x) => x.id === convId);
     if (!c) return;
@@ -2515,19 +2534,21 @@ export default function App() {
     }
     const pid = makeId();
     const controller = new AbortController();
-    abortRef.current = controller;
+    abortsRef.current.set(pid, { controller, convId });
     const thumbs = images.map((i) => i.thumb).filter(Boolean);
-    setPending({
-      id: pid,
-      convId,
-      path: [...path],
-      question,
-      text: '',
-      tools: [],
-      kind,
-      images: thumbs,
-    });
-    setPerms([]);
+    setPendings((ps) => [
+      ...ps,
+      {
+        id: pid,
+        convId,
+        path: [...path],
+        question,
+        text: '',
+        tools: [],
+        kind,
+        images: thumbs,
+      },
+    ]);
     // 提交即清空输入框与附图（内容已显示在回合气泡里）；失败时在 catch 回填。
     if (draftKey) {
       setDrafts((d) => ({ ...d, [draftKey]: '' }));
@@ -2577,11 +2598,15 @@ export default function App() {
         }
         if (ev.type === 'delta' && typeof ev.text === 'string') {
           acc += ev.text;
-          setPending((p) => (p && p.id === pid ? { ...p, text: p.text + ev.text } : p));
+          setPendings((ps) =>
+            ps.map((p) => (p.id === pid ? { ...p, text: p.text + ev.text } : p)),
+          );
         } else if (ev.type === 'tool' && ev.tool) {
           const nextTools = mergeTool(toolsAcc, ev.tool, acc.length);
           toolsAcc = nextTools;
-          setPending((p) => (p && p.id === pid ? { ...p, tools: nextTools } : p));
+          setPendings((ps) =>
+            ps.map((p) => (p.id === pid ? { ...p, tools: nextTools } : p)),
+          );
         } else if (ev.type === 'permission' && ev.requestId) {
           setPerms((ps) =>
             ps.some((x) => x.requestId === ev.requestId)
@@ -2590,6 +2615,7 @@ export default function App() {
                   ...ps,
                   {
                     requestId: ev.requestId,
+                    pid,
                     title: ev.title || '工具权限请求',
                     toolKind: ev.toolKind || '',
                     command: typeof ev.command === 'string' ? ev.command : '',
@@ -2649,27 +2675,27 @@ export default function App() {
           };
         }),
       }));
-      setPending(null);
-      setPerms([]);
+      setPendings((ps) => ps.filter((p) => p.id !== pid));
+      setPerms((ps) => ps.filter((x) => x.pid !== pid));
     } catch (e) {
       if (e.name === 'AbortError' || controller.signal.aborted) {
         setNotice({ kind: 'info', text: '已停止生成，未保存本轮内容' });
       } else {
         setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
       }
-      setPending(null);
-      setPerms([]);
+      setPendings((ps) => ps.filter((p) => p.id !== pid));
+      setPerms((ps) => ps.filter((x) => x.pid !== pid));
       // 失败/停止：输入框已清空，回填原文与附图便于修改后重试
       if (draftKey) {
         setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
         setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
       }
     } finally {
-      abortRef.current = null;
+      abortsRef.current.delete(pid);
     }
   }, []);
 
-  const onStop = useCallback(() => abortRef.current?.abort(), []);
+  const onStop = useCallback((pid) => abortsRef.current.get(pid)?.controller.abort(), []);
 
   const decidePerm = useCallback(async (requestId, optionId) => {
     setPerms((ps) => ps.filter((p) => p.requestId !== requestId));
@@ -2825,17 +2851,17 @@ export default function App() {
       b: marks.filter((m) => m.kind === 'branch').length,
     };
   }, [conv, marks]);
-  const mainPendingHere =
-    pending && conv && pending.convId === conv.id && pending.path.length === 0;
+  const mainPending =
+    conv && pendings.find((p) => p.convId === conv.id && p.path.length === 0);
+  const mainPendingHere = !!mainPending;
   // 待删除工作区的会话数与生成中状态（删除弹窗展示/禁用用）
   const delWsCount = delWs
     ? store.conversations.filter((c) => c.workspace === delWs).length
     : 0;
   const delWsBusy =
     !!delWs &&
-    !!pending &&
     store.conversations.some(
-      (c) => c.workspace === delWs && c.id === pending.convId,
+      (c) => c.workspace === delWs && pendings.some((p) => p.convId === c.id),
     );
 
   // 已注册 + 历史会话引用的工作区（canonical 去重，保序）。
@@ -2858,7 +2884,7 @@ export default function App() {
 
   const sharedProps = {
     convId: conv?.id,
-    pending,
+    pendings,
     busy,
     drafts,
     onDraft,
@@ -2984,7 +3010,7 @@ export default function App() {
               onBrowseWs={() =>
                 setPicker({ initial: '', onPick: pickWorkspace })
               }
-              busyConvId={pending?.convId || null}
+              busyConvIds={pendings.map((p) => p.convId)}
               onToggleGroup={toggleWsGroup}
               onRenameWs={renameWs}
               onDeleteWsRequest={setDelWs}
@@ -3079,7 +3105,9 @@ export default function App() {
               conv.turns.map((t) => (
                 <TurnView {...sharedProps} key={t.id} turn={t} path={[]} />
               ))}
-            {mainPendingHere && <PendingView pending={pending} onStop={onStop} />}
+            {mainPendingHere && (
+              <PendingView pending={mainPending} onStop={() => onStop(mainPending.id)} />
+            )}
             <MarkRail marks={marks} transcriptRef={transcriptRef} onJump={jumpTo} />
           </div>
 
@@ -3414,7 +3442,7 @@ export default function App() {
               只会删除 NewQA 本地的转录、标注与支线；不会删除工作区文件，
               也不会删除 Devin 的原生会话记录。
             </p>
-            {pending?.convId === delConv.id && (
+            {pendings.some((p) => p.convId === delConv.id) && (
               <p className="ws-err" role="alert">
                 该对话正在生成回答，请先停止再删除。
               </p>
@@ -3423,7 +3451,7 @@ export default function App() {
               <button
                 type="button"
                 className="btn-primary danger"
-                disabled={pending?.convId === delConv.id}
+                disabled={pendings.some((p) => p.convId === delConv.id)}
                 onClick={confirmDeleteConv}
               >
                 删除对话

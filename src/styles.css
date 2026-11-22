@@ -649,6 +649,11 @@ body {
 .branch-ui .composer {
   margin-top: 8px;
 }
+.branch-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
 
 /* CSS Custom Highlight API */
 ::highlight(nq-n-yellow) {

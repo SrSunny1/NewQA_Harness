@@ -135,6 +135,7 @@ export function validateChatBody(body) {
     quote = '',
     workspace = '',
     sessionId = null,
+    convId = '',
     kind = 'discussion',
     permissionMode = 'accept-edits',
     modelConfig = null,
@@ -201,6 +202,9 @@ export function validateChatBody(body) {
   if (sessionId !== null && (typeof sessionId !== 'string' || !SAFE_SESSION.test(sessionId))) {
     return { error: 'sessionId 格式不正确' };
   }
+  if (typeof convId !== 'string' || !/^[\w-]{0,80}$/.test(convId)) {
+    return { error: 'convId 格式不正确' };
+  }
   // 贴图附件：≤4 张，mime 白名单，base64 有界
   if (!Array.isArray(images) || images.length > MAX_IMAGES) {
     return { error: `images 最多 ${MAX_IMAGES} 张` };
@@ -214,7 +218,7 @@ export function validateChatBody(body) {
       return { error: '单张图片超过大小上限' };
     }
   }
-  return { history, question, quote, workspace, sessionId, kind, permissionMode, modelConfig: mc, images };
+  return { history, question, quote, workspace, sessionId, convId, kind, permissionMode, modelConfig: mc, images };
 }
 
 // workspace：'' → 服务默认目录；否则解析为真实存在的目录（不回退、不改全局 cwd）。
@@ -333,18 +337,16 @@ async function serveStatic(req, res, pathname, distDir) {
 }
 
 export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = DEFAULT_CWD } = {}) {
-  let busy = false;
+  // 按对话串行：同一 convId 只许一个在跑回合；不同对话/工作区可并行。
+  // 不带 convId 的请求共用 '' 键，保持旧的全局串行语义。
+  const busyConvs = new Set();
   // /api/devin/options 探测结果缓存（仅成功才写入；失败不污染，下次重试）。
   // inflight 去重并发请求，避免同一时刻 spawn 多个 devin acp。
   let optionsCache = null; // { at, data }
   let optionsInflight = null;
-  // 当前回合的权限决策：requestId → {resolve, options}。单回合串行，无自动批准。
+  // 各并发回合的权限决策：requestId → {resolve, options}。无自动批准；
+  // 回合结束只清理自己发出的那批（requestId 为 UUID，跨回合不冲突）。
   const pendingPerms = new Map();
-
-  function clearPerms() {
-    for (const [, p] of pendingPerms) p.resolve(null);
-    pendingPerms.clear();
-  }
 
   async function handleChat(req, res) {
     if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
@@ -362,10 +364,10 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
     if (v.error) return json(res, 400, { error: v.error });
     const ws = await resolveWorkspace(v.workspace);
     if (ws.error) return json(res, 400, { error: ws.error });
-    if (busy) {
-      return json(res, 409, { error: '已有进行中的提问，请先停止或等待完成' });
+    if (busyConvs.has(v.convId)) {
+      return json(res, 409, { error: '该对话已有进行中的提问，请先停止或等待完成' });
     }
-    busy = true;
+    busyConvs.add(v.convId);
     const controller = new AbortController();
     const onClose = () => {
       if (!res.writableEnded) controller.abort();
@@ -381,12 +383,15 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
         res.write(JSON.stringify(ev) + '\n');
       } catch {}
     };
+    // 本回合发出的权限请求 id：回合结束只清自己这批，并发回合互不清除。
+    const myPerms = new Set();
     const onPermission =
       v.kind === 'work'
         ? (info) => {
             send({ type: 'permission', ...info });
             return new Promise((resolve) => {
               pendingPerms.set(info.requestId, { resolve, options: info.options });
+              myPerms.add(info.requestId);
             });
           }
         : null;
@@ -440,12 +445,15 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
         });
       }
     } finally {
-      clearPerms();
+      for (const id of myPerms) {
+        pendingPerms.get(id)?.resolve(null);
+        pendingPerms.delete(id);
+      }
       res.off('close', onClose);
       try {
         res.end();
       } catch {}
-      busy = false;
+      busyConvs.delete(v.convId);
     }
   }
 

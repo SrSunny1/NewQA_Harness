@@ -599,6 +599,7 @@ export function buildChatBody({ conv, kind, history, question, quote = '', image
     question,
     quote,
     workspace: conv.workspace || '',
+    convId: conv.id || '',
     sessionId: kind === 'work' ? conv.sessionId : null,
     kind,
     permissionMode: conv.permissionMode || 'accept-edits',
