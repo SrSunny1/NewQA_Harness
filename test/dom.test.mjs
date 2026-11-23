@@ -243,9 +243,12 @@ const findBtn = (re) =>
 test('dom：新对话 + conv 挂载自动取 /api/devin/options（静默一次）', async () => {
   window.localStorage.clear();
   await mountApp();
-  // 无会话时主输入框不存在；点未分组的「＋」新建
-  const newBtn = container.querySelector('[aria-label="在未分组新建对话"]');
-  assert.ok(newBtn, '未分组有新建按钮');
+  // 无会话时主输入框不存在；未分组 ⋯ 菜单里点「新建对话」
+  const ugBtn = container.querySelector('[aria-label="未分组的操作"]');
+  assert.ok(ugBtn, '未分组有操作菜单');
+  await click(ugBtn);
+  const newBtn = findBtn(/^新建对话$/);
+  assert.ok(newBtn, '菜单里有新建对话');
   await click(newBtn);
   await act(async () => {
     await tick(30);

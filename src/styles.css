@@ -374,9 +374,6 @@ body {
   white-space: nowrap;
   font-weight: 600;
 }
-.ws-group-new {
-  flex-shrink: 0;
-}
 .ws-group .conv-list {
   margin-top: 2px;
   padding-left: 14px;

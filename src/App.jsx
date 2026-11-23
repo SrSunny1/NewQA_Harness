@@ -1970,15 +1970,6 @@ function Sidebar(props) {
               </button>
               <button
                 type="button"
-                className="mini-btn ws-group-new"
-                title={`在 ${wsName(ws)} 新建对话`}
-                aria-label={`在 ${wsName(ws)} 新建对话`}
-                onClick={() => onNewChat(ws)}
-              >
-                ＋
-              </button>
-              <button
-                type="button"
                 className="conv-menu-btn"
                 aria-label={`工作区「${wsName(ws)}」的操作`}
                 aria-haspopup="menu"
@@ -2036,6 +2027,16 @@ function Sidebar(props) {
                     </>
                   ) : (
                     <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          closeMenu();
+                          onNewChat(ws);
+                        }}
+                      >
+                        新建对话
+                      </button>
                       <button
                         type="button"
                         role="menuitem"
@@ -2365,13 +2366,28 @@ function Sidebar(props) {
               </button>
               <button
                 type="button"
-                className="mini-btn ws-group-new"
-                title="在未分组新建对话"
-                aria-label="在未分组新建对话"
-                onClick={() => onNewChat()}
+                className="conv-menu-btn"
+                aria-label="未分组的操作"
+                aria-haspopup="menu"
+                aria-expanded={openMenu?.kind === 'ug'}
+                onClick={() => toggleMenu('ug', 'ungrouped')}
               >
-                ＋
+                ⋯
               </button>
+              {openMenu?.kind === 'ug' && (
+                <div className="conv-menu" role="menu" aria-label="未分组">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeMenu();
+                      onNewChat();
+                    }}
+                  >
+                    新建对话
+                  </button>
+                </div>
+              )}
             </div>
             {(q || !collapsedKeys.includes(UNGROUPED_KEY)) && (
               <ConvList items={ungrouped} {...listProps} />
