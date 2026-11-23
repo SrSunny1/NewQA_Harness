@@ -137,7 +137,7 @@ const PASTE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 const PASTE_FILE_MAX = 15 * 1024 * 1024; // 原始文件硬上限
 const REENCODE_BYTES = 1.5 * 1024 * 1024; // 超过则重编码为 jpeg
 const SEND_MAX_SIDE = 1920;
-const THUMB_SIDE = 640; // 缩略图边长：兼顾存档体积与点击放大后的可读性
+const THUMB_SIDE = 1024; // 缩略图边长：兼顾存档体积（<400KB/图）与灯箱放大后的可读性
 
 function fileDataUrl(file) {
   return new Promise((res, rej) => {
@@ -774,12 +774,7 @@ function QImgs({ srcs }) {
           aria-label="查看图片"
           onClick={() => setZoom(null)}
         >
-          <img
-            className="lb-img"
-            src={srcs[zoom]}
-            alt={`附图 ${zoom + 1} 大图`}
-            onClick={(e) => e.stopPropagation()}
-          />
+          <img className="lb-img" src={srcs[zoom]} alt={`附图 ${zoom + 1} 大图`} />
           {srcs.length > 1 && (
             <>
               <button

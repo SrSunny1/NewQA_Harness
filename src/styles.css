@@ -1132,12 +1132,12 @@ body {
   justify-content: center;
   cursor: zoom-out;
 }
+/* object-fit:contain 使小图也按比例放大充满盒；阴影/圆角作用于元素盒（含留白区），故不设。 */
 .lb-img {
-  max-width: 92vw;
-  max-height: 86vh;
-  border-radius: 8px;
-  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.5);
-  cursor: default;
+  width: 92vw;
+  height: 86vh;
+  object-fit: contain;
+  cursor: zoom-out;
 }
 .lb-nav {
   position: fixed;
