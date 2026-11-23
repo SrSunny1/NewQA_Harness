@@ -232,9 +232,39 @@ body {
 .sidebar {
   border-right: 1px solid var(--line);
   padding: 14px 10px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg-soft);
   animation: rise 0.4s ease both;
+}
+/* 搜索固定顶部、列表滚动、收起条固定底部 */
+.ws-groups {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+.sidebar-foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+.sidebar-collapse {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.sidebar-collapse:hover {
+  background: var(--accent-soft);
+  color: var(--ink);
 }
 .conv-list {
   list-style: none;
@@ -280,9 +310,6 @@ body {
 }
 
 /* ---------- 工作区分组 ---------- */
-.ws-groups {
-  margin-top: 12px;
-}
 .ws-groups-head {
   display: flex;
   align-items: center;

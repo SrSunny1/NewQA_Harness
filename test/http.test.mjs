@@ -720,3 +720,64 @@ test('permissionMode 校验：ask/plan/未知值 → 400，合法值透传', asy
     await res2.text();
   });
 });
+
+test('/api/attachment：上传落盘 → GET 取回原图；非法输入拒绝', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'newqa-attach-'));
+  await withServer(
+    async (base) => {
+      const png = Buffer.from('fake-png-bytes').toString('base64');
+      const up = await postJson(`${base}/api/attachment`, {
+        images: [
+          { data: png, mime: 'image/png' },
+          { data: 'QUJD', mime: 'image/jpeg' },
+        ],
+      });
+      assert.equal(up.status, 200);
+      const { attachments } = await up.json();
+      assert.equal(attachments.length, 2);
+      assert.match(attachments[0].url, /^\/api\/attachment\/[\w-]+\.png$/);
+      assert.match(attachments[1].url, /^\/api\/attachment\/[\w-]+\.jpg$/);
+      // GET 取回：字节一致 + 图片 MIME + 长缓存
+      const g = await fetch(`${base}${attachments[0].url}`);
+      assert.equal(g.status, 200);
+      assert.match(g.headers.get('content-type'), /image\/png/);
+      assert.equal(await g.text(), 'fake-png-bytes');
+      assert.match(g.headers.get('cache-control'), /immutable/);
+      // 非法文件名 / 目录穿越 → 404
+      assert.equal(await getRaw(base, '/api/attachment/nope.txt'), 404);
+      assert.equal(await getRaw(base, '/api/attachment/..%2f..%2fetc'), 404);
+      // 上传校验：空表 / 超量 / 非法 mime / 缺 data
+      assert.equal(
+        (await postJson(`${base}/api/attachment`, { images: [] })).status,
+        400,
+      );
+      assert.equal(
+        (
+          await postJson(`${base}/api/attachment`, {
+            images: Array(5).fill({ data: 'QUJD', mime: 'image/png' }),
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (
+          await postJson(`${base}/api/attachment`, {
+            images: [{ data: 'QUJD', mime: 'image/svg+xml' }],
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (await postJson(`${base}/api/attachment`, { images: [{}] })).status,
+        400,
+      );
+      // 方法守卫
+      assert.equal(
+        (await fetch(`${base}/api/attachment`)).status,
+        405,
+        'GET /api/attachment（无文件名）不允许',
+      );
+    },
+    { attachDir: dir },
+  );
+});

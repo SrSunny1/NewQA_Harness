@@ -120,14 +120,24 @@ export function createConversation(workspace = '') {
   };
 }
 
-// extra 可带 { tools, changes, images, model }
-// （images = 贴图缩略图 dataURL[]，供气泡展示；model 为回合实际生效模型）
+// 附件原图 URL（服务端落盘）：灯箱展示用；非法/外链一律剔除。
+const ATTACH_URL_RE = /^\/api\/attachment\/[\w-]+\.(?:png|jpe?g|webp|gif)$/;
+const asAttachUrls = (v) =>
+  Array.isArray(v)
+    ? v.filter((s) => typeof s === 'string' && ATTACH_URL_RE.test(s)).slice(0, MAX_IMAGES)
+    : [];
+
+// extra 可带 { tools, changes, images, imageUrls, model }
+// （images = 贴图缩略图 dataURL[]，供气泡展示；imageUrls = 附件原图地址；
+//   model 为回合实际生效模型）
 export function createTurn(question, answer, extra = {}) {
   const turn = { id: makeId(), question, answer, notes: [], branches: [] };
   if (Array.isArray(extra.tools) && extra.tools.length) turn.tools = extra.tools;
   if (extra.changes && typeof extra.changes === 'object') turn.changes = extra.changes;
   if (Array.isArray(extra.images) && extra.images.length)
     turn.images = extra.images.slice(0, MAX_IMAGES);
+  const iurls = asAttachUrls(extra.imageUrls);
+  if (iurls.length) turn.imageUrls = iurls;
   if (typeof extra.model === 'string' && extra.model)
     turn.model = extra.model.slice(0, EFFECTIVE_MODEL_LIMIT);
   return turn;
@@ -533,6 +543,8 @@ function asTurn(raw) {
         .slice(0, MAX_IMAGES)
     : [];
   if (images.length) turn.images = images;
+  const iurls = asAttachUrls(raw.imageUrls);
+  if (iurls.length) turn.imageUrls = iurls;
   // 回合实际生效模型（done 事件上报；旧档无字段 → 缺省）
   if (typeof raw.model === 'string' && raw.model)
     turn.model = raw.model.slice(0, EFFECTIVE_MODEL_LIMIT);

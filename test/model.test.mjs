@@ -465,6 +465,29 @@ test('parseStored：turn.images 缩略图消毒（非 dataURL/超长剔除，最
   ]);
 });
 
+test('parseStored：turn.imageUrls 仅放行 /api/attachment 白名单（防外链注入）', () => {
+  const t = {
+    id: 't1',
+    question: 'q',
+    answer: 'a',
+    imageUrls: [
+      '/api/attachment/abc-123.png',
+      'https://evil.example/x.png',
+      '/api/attachment/../../etc/passwd',
+      'data:image/png;base64,QUJD',
+      '/api/attachment/def.webp',
+      42,
+    ],
+  };
+  const s = parseStored(
+    JSON.stringify({ v: 1, conversations: [{ id: 'c1', title: 'x', turns: [t] }] }),
+  );
+  assert.deepEqual(s.conversations[0].turns[0].imageUrls, [
+    '/api/attachment/abc-123.png',
+    '/api/attachment/def.webp',
+  ]);
+});
+
 test('parseLayout：默认、钳制、非法输入', () => {
   assert.equal(parseLayout(null), null);
   assert.equal(parseLayout('{bad'), null);

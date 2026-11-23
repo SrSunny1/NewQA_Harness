@@ -187,6 +187,26 @@ async function readPastedImage(file) {
   return { data, mime, thumb };
 }
 
+// 发送前把附图传服务端落盘：灯箱/历史查看用原图 URL，localStorage 只留缩略图。
+// 失败返回 null——不阻断发送，气泡仍显示本地缩略图。
+async function uploadAttachments(images) {
+  try {
+    const r = await fetch('/api/attachment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        images: images.map((i) => ({ data: i.data, mime: i.mime })),
+      }),
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => ({}));
+    const urls = (j.attachments || []).map((a) => a.url);
+    return urls.length === images.length ? urls : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------- 选区 → 锚点 ----------
 
 function blockElOf(node) {
@@ -745,9 +765,11 @@ function GitView({ changes }) {
   );
 }
 
-// 提问气泡附图：点击缩略图开灯箱放大，←/→ 切换，Esc/点空白关闭。
-function QImgs({ srcs }) {
+// 提问气泡附图：点击缩略图开灯箱。urls 为服务端原图地址（优先，清晰）；
+// 缺失或加载失败回落本地缩略图。←/→ 切换，Esc/点空白关闭。
+function QImgs({ srcs, urls }) {
   const [zoom, setZoom] = useState(null);
+  const [failedUrls, setFailedUrls] = useState(() => new Set());
   useEffect(() => {
     if (zoom == null) return;
     const onKey = (e) => {
@@ -758,6 +780,10 @@ function QImgs({ srcs }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [zoom, srcs.length]);
+  const zoomSrc = (i) => {
+    const u = urls?.[i];
+    return u && !failedUrls.has(i) ? u : srcs[i];
+  };
   return (
     <span className="q-imgs">
       {srcs.map((src, i) => (
@@ -780,7 +806,18 @@ function QImgs({ srcs }) {
           aria-label="查看图片"
           onClick={() => setZoom(null)}
         >
-          <img className="lb-img" src={srcs[zoom]} alt={`附图 ${zoom + 1} 大图`} />
+          <img
+            key={zoom}
+            className="lb-img"
+            src={zoomSrc(zoom)}
+            alt={`附图 ${zoom + 1} 大图`}
+            onError={() => {
+              const u = urls?.[zoom];
+              if (u && !failedUrls.has(zoom)) {
+                setFailedUrls((s) => new Set(s).add(zoom));
+              }
+            }}
+          />
           {srcs.length > 1 && (
             <>
               <button
@@ -826,7 +863,9 @@ function PendingView({ pending, onStop }) {
   return (
     <article className="turn pending" aria-live="polite" aria-label="正在生成回答">
       <div className="turn-q">
-        {!!pending.images?.length && <QImgs srcs={pending.images} />}
+        {!!pending.images?.length && (
+          <QImgs srcs={pending.images} urls={pending.imageUrls} />
+        )}
         {pending.question}
       </div>
       <div className="turn-a">
@@ -913,7 +952,7 @@ function TurnView(props) {
   return (
     <article className="turn" data-turn={turn.id}>
       <div className="turn-q">
-        {!!turn.images?.length && <QImgs srcs={turn.images} />}
+        {!!turn.images?.length && <QImgs srcs={turn.images} urls={turn.imageUrls} />}
         {turn.question}
       </div>
       <div className="turn-a">
@@ -1712,6 +1751,7 @@ function Sidebar(props) {
     onDeleteFolder,
     onMoveWs,
     onMoveFolder,
+    onCollapse,
   } = props;
   const [query, setQuery] = useState('');
   const [openMenu, setOpenMenu] = useState(null);
@@ -2341,6 +2381,20 @@ function Sidebar(props) {
           <p className="conv-empty">未找到匹配的会话或工作区</p>
         )}
       </div>
+
+      {onCollapse && (
+        <div className="sidebar-foot">
+          <button
+            type="button"
+            className="sidebar-collapse"
+            onClick={onCollapse}
+            title="收起侧栏"
+            aria-label="收起侧栏"
+          >
+            « 收起侧栏
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -3288,6 +3342,7 @@ export default function App() {
     const controller = new AbortController();
     abortsRef.current.set(pid, { controller, convId });
     const thumbs = images.map((i) => i.thumb).filter(Boolean);
+    const imageUrls = images?.length ? await uploadAttachments(images) : null;
     setPendings((ps) => [
       ...ps,
       {
@@ -3299,6 +3354,7 @@ export default function App() {
         tools: [],
         kind,
         images: thumbs,
+        imageUrls,
       },
     ]);
     // 提交即清空输入框与附图（内容已显示在回合气泡里）；失败时在 catch 回填。
@@ -3409,6 +3465,7 @@ export default function App() {
             tools: toolsAcc,
             changes,
             images: thumbs,
+            imageUrls,
             model: doneModel,
           });
           return {
@@ -3447,7 +3504,7 @@ export default function App() {
           acc.trim()
             ? `${acc}\n\n（⚠ 生成中断，回答不完整）`
             : '（⚠ 生成中断，未产生回答内容）',
-          { tools: toolsAcc, changes, images: thumbs, model: doneModel },
+          { tools: toolsAcc, changes, images: thumbs, imageUrls, model: doneModel },
         );
         setStore((s) => ({
           ...s,
@@ -3801,6 +3858,11 @@ export default function App() {
               onDeleteFolder={deleteWsFolder}
               onMoveWs={moveWsToFolder}
               onMoveFolder={moveWsFolder}
+              onCollapse={
+                narrow
+                  ? () => setSidebarOpen(false)
+                  : () => setLayout((l) => ({ ...l, leftCollapsed: true }))
+              }
             />
           </nav>
         )}

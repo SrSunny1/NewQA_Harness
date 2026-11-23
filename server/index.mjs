@@ -1,8 +1,10 @@
 // NewQA 本地 HTTP 服务：托管 dist 静态资源 + /api/*（NDJSON 流）。
 // 只绑 127.0.0.1；不开放 CORS；校验 Host/Origin；不向浏览器暴露 stdio/环境。
 import http from 'node:http';
-import { readFile, realpath, stat, opendir } from 'node:fs/promises';
+import { readFile, realpath, stat, opendir, mkdir, writeFile } from 'node:fs/promises';
 import { execFile, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runTurn, probeOptions, AcpError, KINDS, MODEL_CONFIG_KEYS } from './acp.mjs';
@@ -17,6 +19,15 @@ const CHAT_BODY_LIMIT = 28 * 1024 * 1024; // /api/chat 允许贴图（≤4 张 b
 const MAX_IMAGES = 4;
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const IMAGE_DATA_LIMIT = 8 * 1024 * 1024; // 单张 base64 字符上限（≈6 MiB）
+// 贴图附件落盘：localStorage 只存小缩略图，灯箱/查看走这里的原图。
+const DEFAULT_ATTACH_DIR = path.join(os.homedir(), '.newqa', 'attachments');
+const ATTACH_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+const ATTACH_NAME = /^[\w-]+\.(?:png|jpg|webp|gif)$/;
 
 const LIMITS = {
   history: 200,
@@ -35,6 +46,8 @@ const MIME = {
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
 };
@@ -337,7 +350,12 @@ async function serveStatic(req, res, pathname, distDir) {
   return true;
 }
 
-export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = DEFAULT_CWD } = {}) {
+export function createServer({
+  distDir = DEFAULT_DIST,
+  spawnImpl,
+  defaultCwd = DEFAULT_CWD,
+  attachDir = DEFAULT_ATTACH_DIR,
+} = {}) {
   // 按对话串行：同一 convId 只许一个在跑回合；不同对话/工作区可并行。
   // 不带 convId 的请求共用 '' 键，保持旧的全局串行语义。
   const busyConvs = new Set();
@@ -570,6 +588,79 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
     });
   }
 
+  // 贴图附件：POST /api/attachment {images:[{data,mime}]} → 落盘返回 URL；
+  // GET /api/attachment/<uuid>.<ext> 供灯箱取原图。文件名服务端生成，无穿越面。
+  async function handleAttachmentUpload(req, res) {
+    if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (!ct.startsWith('application/json')) {
+      return json(res, 415, { error: '仅接受 JSON 请求体' });
+    }
+    let body;
+    try {
+      body = await readBody(req, CHAT_BODY_LIMIT);
+    } catch (e) {
+      return json(res, e.statusCode || 400, { error: e.message || '请求体无效' });
+    }
+    const list = Array.isArray(body?.images) ? body.images : null;
+    if (!list || !list.length || list.length > MAX_IMAGES) {
+      return json(res, 400, { error: `images 需为 1–${MAX_IMAGES} 项` });
+    }
+    for (const im of list) {
+      if (
+        !im ||
+        typeof im !== 'object' ||
+        typeof im.data !== 'string' ||
+        !im.data.length ||
+        im.data.length > IMAGE_DATA_LIMIT ||
+        !IMAGE_MIMES.has(im.mime) ||
+        !ATTACH_EXT[im.mime]
+      ) {
+        return json(res, 400, { error: '图片附件格式或大小不正确' });
+      }
+    }
+    try {
+      await mkdir(attachDir, { recursive: true });
+    } catch {
+      return json(res, 500, { error: '附件目录不可用' });
+    }
+    const attachments = [];
+    for (const im of list) {
+      const name = `${randomUUID()}.${ATTACH_EXT[im.mime]}`;
+      try {
+        await writeFile(
+          path.join(attachDir, name),
+          Buffer.from(im.data, 'base64'),
+        );
+      } catch {
+        return json(res, 500, { error: '附件写入失败' });
+      }
+      attachments.push({ id: name, url: `/api/attachment/${name}` });
+    }
+    return json(res, 200, { attachments });
+  }
+
+  async function handleAttachmentGet(req, res, pathname) {
+    if (req.method !== 'GET') return json(res, 405, { error: '仅支持 GET' });
+    const name = pathname.slice('/api/attachment/'.length);
+    if (!ATTACH_NAME.test(name)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+      return;
+    }
+    try {
+      const data = await readFile(path.join(attachDir, name));
+      res.writeHead(200, {
+        'Content-Type': MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end(data);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+    }
+  }
+
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
@@ -581,6 +672,11 @@ export function createServer({ distDir = DEFAULT_DIST, spawnImpl, defaultCwd = D
       if (pathname === '/api/chat/permission') return await handlePermissionDecision(req, res);
       if (pathname === '/api/workspace/inspect') return await handleInspect(req, res);
       if (pathname === '/api/workspace/browse') return await handleBrowse(req, res);
+      if (pathname === '/api/attachment' || pathname.startsWith('/api/attachment/')) {
+        return pathname === '/api/attachment'
+          ? await handleAttachmentUpload(req, res)
+          : await handleAttachmentGet(req, res, pathname);
+      }
       if (req.method !== 'GET') return json(res, 405, { error: 'Method Not Allowed' });
       if (pathname === '/api/status') {
         return json(res, 200, { ...probeCli(), defaultCwd: DEFAULT_CWD });
