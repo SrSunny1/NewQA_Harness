@@ -50,6 +50,7 @@ import {
   isBillableModel,
   isBillableSpeed,
   MAX_IMAGES,
+  THUMB_LIMIT,
 } from './model.js';
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
 import {
@@ -137,7 +138,9 @@ const PASTE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 const PASTE_FILE_MAX = 15 * 1024 * 1024; // 原始文件硬上限
 const REENCODE_BYTES = 1.5 * 1024 * 1024; // 超过则重编码为 jpeg
 const SEND_MAX_SIDE = 1920;
-const THUMB_SIDE = 1024; // 缩略图边长：兼顾存档体积（<400KB/图）与灯箱放大后的可读性
+// 存档图：尽量大以保证灯箱清晰，超出 THUMB_LIMIT 安全线则降尺寸重试
+const THUMB_SIDES = [1400, 1024, 768, 512];
+const THUMB_SAFE = Math.floor(THUMB_LIMIT * 0.95);
 
 function fileDataUrl(file) {
   return new Promise((res, rej) => {
@@ -164,7 +167,10 @@ async function readPastedImage(file) {
     ctx.drawImage(bmp, 0, 0, c.width, c.height);
     return c.toDataURL('image/jpeg', quality);
   };
-  const thumb = scaled(THUMB_SIDE, 0.72);
+  // 存档图取「能存下的最大尺寸」：1400px 起逐级降，jpeg 质量 0.8 保文字清晰
+  const thumb =
+    THUMB_SIDES.map((s) => scaled(s, 0.8)).find((t) => t.length <= THUMB_SAFE) ||
+    scaled(THUMB_SIDES.at(-1), 0.8);
   const needReencode =
     file.size > REENCODE_BYTES || Math.max(bmp.width, bmp.height) > SEND_MAX_SIDE;
   let data;
