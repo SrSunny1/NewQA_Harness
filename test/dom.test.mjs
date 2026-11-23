@@ -779,6 +779,94 @@ test('dom：左栏搜索过滤会话、Esc 清空，且对话设置展示摘要'
   assert.equal(search.value, '', 'Esc 清空搜索');
 });
 
+test('dom：工作区文件夹——新建/重命名/菜单移入/删除回落顶层', async () => {
+  // 种子：两个已注册工作区各挂一个会话
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'c1', title: 'A 的对话', turns: [], workspace: '/tmp/ws-a', sessionId: null },
+        { id: 'c2', title: 'B 的对话', turns: [], workspace: '/tmp/ws-b', sessionId: null },
+      ],
+      activeId: 'c1',
+      workspaces: ['/tmp/ws-a', '/tmp/ws-b'],
+      wsNames: {},
+    }),
+  );
+  await mountApp();
+  await act(async () => {
+    await tick(30);
+  });
+  const topGroups = () =>
+    [...container.querySelectorAll('.ws-groups > .ws-group[data-ws]')].filter(
+      (s) => s.dataset.ws !== '__ungrouped__',
+    );
+  assert.equal(topGroups().length, 2, '初始两个顶层工作区');
+  assert.ok(!container.querySelector('.ws-folder'), '初始无文件夹');
+
+  // 新建文件夹：点击后进入重命名，输入名并 Enter
+  await click(container.querySelector('button[aria-label="新建文件夹（归类工作区）"]'));
+  const renameInput = container.querySelector('.ws-folder .conv-rename input');
+  assert.ok(renameInput, '新建文件夹后出现重命名输入');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(
+      renameInput,
+      '项目集',
+    );
+    renameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await key(renameInput, 'Enter');
+  const folderHead = container.querySelector('.ws-folder .ws-group-name');
+  assert.equal(folderHead?.textContent, '项目集', '文件夹名生效');
+  const stored1 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(stored1.wsFolders[0].name, '项目集', '文件夹持久化');
+
+  // ws-a 经 ⋯ 菜单「移动到文件夹」移入
+  const wsA = container.querySelector('.ws-group[data-ws="/tmp/ws-a"]');
+  await click(wsA.querySelector('.conv-menu-btn'));
+  const menuBtn = (re) =>
+    [...container.querySelectorAll('.conv-menu button')].find((b) =>
+      re.test(b.textContent),
+    );
+  await click(menuBtn(/移动到文件夹/));
+  await click(menuBtn(/项目集/));
+  const stored2 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.ok(stored2.wsFolderId['/tmp/ws-a'], '归属映射持久化');
+  assert.equal(
+    container.querySelectorAll('.ws-folder-body .ws-group[data-ws]').length,
+    1,
+    'ws-a 已进文件夹',
+  );
+  assert.equal(topGroups().length, 1, '顶层只剩 ws-b');
+
+  // ws-b 也移入 → 顶层清空
+  const wsB = container.querySelector(
+    '.ws-groups > .ws-group[data-ws="/tmp/ws-b"]',
+  );
+  await click(wsB.querySelector('.conv-menu-btn'));
+  await click(menuBtn(/移动到文件夹/));
+  await click(menuBtn(/项目集/));
+  assert.equal(
+    container.querySelectorAll('.ws-folder-body .ws-group[data-ws]').length,
+    2,
+    '两个工作区同在一个文件夹',
+  );
+  assert.equal(topGroups().length, 0, '顶层无散落工作区');
+
+  // 删除文件夹 → 成员回落顶层，不删工作区/会话
+  await click(container.querySelector('.ws-folder .conv-menu-btn'));
+  await click(findBtn(/删除文件夹/));
+  assert.ok(!container.querySelector('.ws-folder'), '文件夹已删');
+  assert.equal(topGroups().length, 2, '两个工作区回落顶层');
+  const stored3 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.deepEqual(stored3.wsFolders, []);
+  assert.deepEqual(stored3.wsFolderId, {});
+  assert.equal(stored3.workspaces.length, 2, '工作区注册表未受影响');
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);

@@ -379,6 +379,39 @@ test('parseStored：wsNames 别名消毒 + 旧存档兼容', () => {
   assert.deepEqual(old.wsNames, {});
 });
 
+test('parseStored：wsFolders/wsFolderId 文件夹字段消毒 + 旧存档兼容', () => {
+  const raw = JSON.stringify({
+    v: 1,
+    conversations: [{ id: 'c1', title: 'x', turns: [] }],
+    activeId: 'c1',
+    workspaces: ['/a', '/b', '/c'],
+    wsFolders: [
+      { id: 'f1', name: '  工作  ' },
+      { id: 'f2' }, // 无名 → 默认名
+      { name: '无id' }, // 缺 id 剔除
+      'str',
+    ],
+    wsFolderId: {
+      '/a': 'f1',
+      '/b': 'f2',
+      '/c': 'ghost', // 指向不存在的文件夹 → 剔除
+      'relative': 'f1', // 非绝对路径 → 剔除
+      '/d': 42,
+    },
+  });
+  const s = parseStored(raw);
+  assert.deepEqual(s.wsFolders, [
+    { id: 'f1', name: '工作' },
+    { id: 'f2', name: '文件夹' },
+  ]);
+  assert.deepEqual(s.wsFolderId, { '/a': 'f1', '/b': 'f2' });
+  const old = parseStored(
+    JSON.stringify({ v: 1, conversations: [{ id: 'c1', title: 'x', turns: [] }] }),
+  );
+  assert.deepEqual(old.wsFolders, []);
+  assert.deepEqual(old.wsFolderId, {});
+});
+
 test('parseStored：turn.images 缩略图消毒（非 dataURL/超长剔除，最多 4 张）', () => {
   const t = {
     id: 't1',

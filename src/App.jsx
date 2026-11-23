@@ -79,7 +79,15 @@ function loadStore() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw)
-      return { conversations: [], activeId: null, workspaces: [], wsNames: {}, loadError: null };
+      return {
+        conversations: [],
+        activeId: null,
+        workspaces: [],
+        wsNames: {},
+        wsFolders: [],
+        wsFolderId: {},
+        loadError: null,
+      };
     return { ...parseStored(raw), loadError: null };
   } catch (e) {
     try {
@@ -94,6 +102,8 @@ function loadStore() {
       activeId: null,
       workspaces: [],
       wsNames: {},
+      wsFolders: [],
+      wsFolderId: {},
       loadError: '本地存档损坏（已备份为 newqa:v1:corrupt），从空白开始。',
     };
   }
@@ -1471,6 +1481,25 @@ function FolderIcon() {
   );
 }
 
+function FolderPlusIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1.75 3.5A1.25 1.25 0 0 1 3 2.25h3.1l1.4 1.5H13A1.25 1.25 0 0 1 14.25 5v7.5A1.25 1.25 0 0 1 13 13.75H3A1.25 1.25 0 0 1 1.75 12.5v-9z" />
+      <path d="M8 7.25v4M6 9.25h4" />
+    </svg>
+  );
+}
+
 function ConvList({
   items,
   activeId,
@@ -1592,6 +1621,8 @@ function Sidebar(props) {
     activeId,
     workspaces,
     wsNames = {},
+    wsFolders = [],
+    wsFolderId = {},
     collapsedKeys,
     onNewChat,
     onSwitch,
@@ -1602,11 +1633,19 @@ function Sidebar(props) {
     onToggleGroup,
     onRenameWs,
     onDeleteWsRequest,
+    onCreateFolder,
+    onRenameFolder,
+    onDeleteFolder,
+    onMoveWs,
   } = props;
   const [query, setQuery] = useState('');
   const [openMenu, setOpenMenu] = useState(null);
   const [renamingWs, setRenamingWs] = useState(null);
   const [wsRenameVal, setWsRenameVal] = useState('');
+  const [renamingFolder, setRenamingFolder] = useState(null);
+  const [folderRenameVal, setFolderRenameVal] = useState('');
+  const [wsMoveFor, setWsMoveFor] = useState(null); // 「移动到文件夹」二级页所在工作区
+  const [dropTarget, setDropTarget] = useState(null); // folderId | 'root' | null
   const wsName = (ws) => wsNames[ws] || baseName(ws);
 
   const toggleMenu = useCallback((kind, id) => {
@@ -1615,6 +1654,7 @@ function Sidebar(props) {
   const closeMenu = useCallback(() => setOpenMenu(null), []);
 
   useEffect(() => {
+    setWsMoveFor(null);
     if (!openMenu) return;
     const onDown = (e) => {
       if (e.target.closest?.('.conv-menu, .conv-menu-btn')) return;
@@ -1652,7 +1692,352 @@ function Sidebar(props) {
     setRenamingWs(null);
   };
 
+  const commitFolderRename = (id) => {
+    const name = folderRenameVal.trim().slice(0, 80);
+    if (name) onRenameFolder(id, name);
+    setRenamingFolder(null);
+  };
+
   let visibleWsCount = 0;
+
+  const folderIdSet = new Set(wsFolders.map((f) => f.id));
+  // 归属缺失/悬空的映射一律按顶层工作区处理（双保险，持久层已过滤）。
+  const topLevelWs = workspaces.filter(
+    (w) => !wsFolderId[w] || !folderIdSet.has(wsFolderId[w]),
+  );
+  const wsConvs = (ws) => conversations.filter((c) => c.workspace === ws);
+  const nameHit = (ws) =>
+    wsName(ws).toLowerCase().includes(q) || ws.toLowerCase().includes(q);
+  const folderMembers = (f) => workspaces.filter((w) => wsFolderId[w] === f.id);
+  const folderHit = (f) => f.name.toLowerCase().includes(q);
+  const wsConvHit = (ws) =>
+    wsConvs(ws).some((c) => c.title.toLowerCase().includes(q));
+  const wsBusy = (ws) => wsConvs(ws).some((c) => busyConvIds.includes(c.id));
+  const folderShownMembers = (f) => {
+    const members = folderMembers(f);
+    return q && !folderHit(f)
+      ? members.filter((w) => nameHit(w) || wsConvHit(w))
+      : members;
+  };
+  const visibleFolders = wsFolders.filter(
+    (f) => !q || folderHit(f) || folderShownMembers(f).length > 0,
+  );
+
+  const onWsDragOver = (e, target) => {
+    if (!e.dataTransfer.types.includes('application/x-newqa-ws')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    setDropTarget(target);
+  };
+  const onWsDrop = (e, folderIdOrNull) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const ws = e.dataTransfer.getData('application/x-newqa-ws');
+    if (ws) onMoveWs(ws, folderIdOrNull);
+    setDropTarget(null);
+  };
+  const onDragLeave = (e) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) setDropTarget(null);
+  };
+
+  // 单个工作区分组（顶层或文件夹内通用）。
+  const renderWs = (ws, showAll = false) => {
+    const allItems = wsConvs(ws);
+    const hit = !q || nameHit(ws) || showAll;
+    const items = q && !hit
+      ? allItems.filter((c) => c.title.toLowerCase().includes(q))
+      : allItems;
+    if (q && !hit && items.length === 0) return null;
+    visibleWsCount++;
+    const collapsed = q ? false : collapsedKeys.includes(ws);
+    const hasBusy = wsBusy(ws);
+    const wsMenuOpen = openMenu?.kind === 'ws' && openMenu.id === ws;
+    return (
+      <section className="ws-group" key={ws} data-ws={ws}>
+        <div
+          className="ws-group-head"
+          draggable={renamingWs !== ws}
+          onDragStart={(e) => {
+            e.dataTransfer.setData('application/x-newqa-ws', ws);
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragEnd={() => setDropTarget(null)}
+        >
+          {renamingWs === ws ? (
+            <span className="conv-rename" role="form" aria-label="重命名工作区">
+              <input
+                className="ws-input"
+                aria-label="工作区显示名（留空恢复目录名）"
+                placeholder={baseName(ws)}
+                maxLength={80}
+                value={wsRenameVal}
+                autoFocus
+                onChange={(e) => setWsRenameVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitWsRename(ws);
+                  if (e.key === 'Escape') setRenamingWs(null);
+                }}
+              />
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => commitWsRename(ws)}
+              >
+                保存
+              </button>
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => setRenamingWs(null)}
+              >
+                取消
+              </button>
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ws-group-toggle"
+                aria-expanded={!collapsed}
+                title={ws}
+                aria-label={`工作区 ${wsName(ws)}，${allItems.length} 个会话`}
+                onClick={() => onToggleGroup(ws)}
+              >
+                <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+                <FolderIcon />
+                <span className="ws-group-name">{wsName(ws)}</span>
+                {hasBusy && (
+                  <span className="busy-dot" aria-label="有会话正在生成" title="有会话正在生成" />
+                )}
+              </button>
+              <button
+                type="button"
+                className="mini-btn ws-group-new"
+                title={`在 ${wsName(ws)} 新建对话`}
+                aria-label={`在 ${wsName(ws)} 新建对话`}
+                onClick={() => onNewChat(ws)}
+              >
+                ＋
+              </button>
+              <button
+                type="button"
+                className="conv-menu-btn"
+                aria-label={`工作区「${wsName(ws)}」的操作`}
+                aria-haspopup="menu"
+                aria-expanded={wsMenuOpen}
+                onClick={() => toggleMenu('ws', ws)}
+              >
+                ⋯
+              </button>
+              {wsMenuOpen && (
+                <div
+                  className="conv-menu"
+                  role="menu"
+                  aria-label={`工作区「${wsName(ws)}」`}
+                >
+                  {wsMoveFor === ws ? (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setWsMoveFor(null)}
+                      >
+                        ‹ 返回
+                      </button>
+                      <div className="menu-label">移动到文件夹</div>
+                      {wsFolders.map((f) => (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          key={f.id}
+                          onClick={() => {
+                            onMoveWs(ws, f.id);
+                            closeMenu();
+                          }}
+                        >
+                          {wsFolderId[ws] === f.id ? '✓ ' : ''}
+                          {f.name}
+                        </button>
+                      ))}
+                      {wsFolders.length === 0 && (
+                        <span className="menu-empty">还没有文件夹，先在上方新建</span>
+                      )}
+                      {wsFolderId[ws] && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            onMoveWs(ws, null);
+                            closeMenu();
+                          }}
+                        >
+                          移出文件夹
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          closeMenu();
+                          setRenamingWs(ws);
+                          setWsRenameVal(wsNames[ws] || '');
+                        }}
+                      >
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setWsMoveFor(ws)}
+                      >
+                        移动到文件夹…
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="danger"
+                        onClick={() => {
+                          closeMenu();
+                          onDeleteWsRequest(ws);
+                        }}
+                      >
+                        删除工作区
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        {!collapsed && <ConvList items={items} {...listProps} />}
+      </section>
+    );
+  };
+
+  // 工作区文件夹分组：可折叠、可重命名/删除（成员回落顶层）、可作拖放目标。
+  const renderFolder = (f) => {
+    const members = folderShownMembers(f);
+    const memberAll = folderMembers(f);
+    const collapsed = q ? false : collapsedKeys.includes(`wf:${f.id}`);
+    const anyBusy = memberAll.some(wsBusy);
+    const fMenuOpen = openMenu?.kind === 'folder' && openMenu.id === f.id;
+    const hit = q && folderHit(f);
+    return (
+      <section
+        className={`ws-folder ${dropTarget === f.id ? 'drop' : ''}`}
+        key={f.id}
+        onDragOver={(e) => onWsDragOver(e, f.id)}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => onWsDrop(e, f.id)}
+      >
+        <div className="ws-group-head">
+          {renamingFolder === f.id ? (
+            <span className="conv-rename" role="form" aria-label="重命名文件夹">
+              <input
+                className="ws-input"
+                aria-label="文件夹名"
+                maxLength={80}
+                value={folderRenameVal}
+                autoFocus
+                onChange={(e) => setFolderRenameVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitFolderRename(f.id);
+                  if (e.key === 'Escape') setRenamingFolder(null);
+                }}
+              />
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => commitFolderRename(f.id)}
+              >
+                保存
+              </button>
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => setRenamingFolder(null)}
+              >
+                取消
+              </button>
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ws-group-toggle folder"
+                aria-expanded={!collapsed}
+                aria-label={`文件夹 ${f.name}，${memberAll.length} 个工作区`}
+                onClick={() => onToggleGroup(`wf:${f.id}`)}
+              >
+                <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+                <FolderIcon />
+                <span className="ws-group-name">{f.name}</span>
+                {anyBusy && (
+                  <span className="busy-dot" aria-label="有会话正在生成" title="有会话正在生成" />
+                )}
+                <span className="ws-count">{memberAll.length}</span>
+              </button>
+              <button
+                type="button"
+                className="conv-menu-btn"
+                aria-label={`文件夹「${f.name}」的操作`}
+                aria-haspopup="menu"
+                aria-expanded={fMenuOpen}
+                onClick={() => toggleMenu('folder', f.id)}
+              >
+                ⋯
+              </button>
+              {fMenuOpen && (
+                <div
+                  className="conv-menu"
+                  role="menu"
+                  aria-label={`文件夹「${f.name}」`}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeMenu();
+                      setRenamingFolder(f.id);
+                      setFolderRenameVal(f.name);
+                    }}
+                  >
+                    重命名
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="danger"
+                    onClick={() => {
+                      closeMenu();
+                      onDeleteFolder(f.id);
+                    }}
+                  >
+                    删除文件夹
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        {!collapsed && (
+          <div className="ws-folder-body">
+            {members.map((ws) => renderWs(ws, hit))}
+            {memberAll.length === 0 && (
+              <p className="ws-folder-empty">
+                把工作区拖到此处，或经工作区 ⋯ 菜单移入
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+    );
+  };
 
   return (
     <>
@@ -1683,135 +2068,44 @@ function Sidebar(props) {
         )}
       </div>
 
-      <div className="ws-groups">
+      <div
+        className={`ws-groups ${dropTarget === 'root' ? 'drop' : ''}`}
+        onDragOver={(e) => onWsDragOver(e, 'root')}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => onWsDrop(e, null)}
+      >
         <div className="ws-groups-head">
           <span className="ws-groups-title">工作区</span>
-          <button
-            type="button"
-            className="mini-btn ws-add"
-            aria-label="浏览并添加工作区目录"
-            title="浏览并添加工作区目录"
-            onClick={onBrowseWs}
-          >
-            ＋
-          </button>
+          <span className="ws-groups-actions">
+            <button
+              type="button"
+              className="mini-btn ws-add"
+              aria-label="新建文件夹（归类工作区）"
+              title="新建文件夹（归类工作区）"
+              onClick={() => {
+                const f = onCreateFolder('新文件夹');
+                if (f) {
+                  setRenamingFolder(f.id);
+                  setFolderRenameVal(f.name);
+                }
+              }}
+            >
+              <FolderPlusIcon />
+            </button>
+            <button
+              type="button"
+              className="mini-btn ws-add"
+              aria-label="浏览并添加工作区目录"
+              title="浏览并添加工作区目录"
+              onClick={onBrowseWs}
+            >
+              ＋
+            </button>
+          </span>
         </div>
 
-        {workspaces.map((ws) => {
-          const allItems = conversations.filter((c) => c.workspace === ws);
-          const wsHit = q && (wsName(ws).toLowerCase().includes(q) || ws.toLowerCase().includes(q));
-          const items = q && !wsHit ? allItems.filter((c) => c.title.toLowerCase().includes(q)) : allItems;
-          if (q && !wsHit && items.length === 0) return null;
-          visibleWsCount++;
-          const collapsed = q ? false : collapsedKeys.includes(ws);
-          const hasBusy = allItems.some((c) => busyConvIds.includes(c.id));
-          const wsMenuOpen = openMenu?.kind === 'ws' && openMenu.id === ws;
-          return (
-            <section className="ws-group" key={ws} data-ws={ws}>
-              <div className="ws-group-head">
-                {renamingWs === ws ? (
-                  <span className="conv-rename" role="form" aria-label="重命名工作区">
-                    <input
-                      className="ws-input"
-                      aria-label="工作区显示名（留空恢复目录名）"
-                      placeholder={baseName(ws)}
-                      maxLength={80}
-                      value={wsRenameVal}
-                      autoFocus
-                      onChange={(e) => setWsRenameVal(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitWsRename(ws);
-                        if (e.key === 'Escape') setRenamingWs(null);
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="mini-btn"
-                      onClick={() => commitWsRename(ws)}
-                    >
-                      保存
-                    </button>
-                    <button
-                      type="button"
-                      className="mini-btn"
-                      onClick={() => setRenamingWs(null)}
-                    >
-                      取消
-                    </button>
-                  </span>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="ws-group-toggle"
-                      aria-expanded={!collapsed}
-                      title={ws}
-                      aria-label={`工作区 ${wsName(ws)}，${allItems.length} 个会话`}
-                      onClick={() => onToggleGroup(ws)}
-                    >
-                      <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-                      <FolderIcon />
-                      <span className="ws-group-name">{wsName(ws)}</span>
-                      {hasBusy && (
-                        <span className="busy-dot" aria-label="有会话正在生成" title="有会话正在生成" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      className="mini-btn ws-group-new"
-                      title={`在 ${wsName(ws)} 新建对话`}
-                      aria-label={`在 ${wsName(ws)} 新建对话`}
-                      onClick={() => onNewChat(ws)}
-                    >
-                      ＋
-                    </button>
-                    <button
-                      type="button"
-                      className="conv-menu-btn"
-                      aria-label={`工作区「${wsName(ws)}」的操作`}
-                      aria-haspopup="menu"
-                      aria-expanded={wsMenuOpen}
-                      onClick={() => toggleMenu('ws', ws)}
-                    >
-                      ⋯
-                    </button>
-                    {wsMenuOpen && (
-                      <div
-                        className="conv-menu"
-                        role="menu"
-                        aria-label={`工作区「${wsName(ws)}」`}
-                      >
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            closeMenu();
-                            setRenamingWs(ws);
-                            setWsRenameVal(wsNames[ws] || '');
-                          }}
-                        >
-                          重命名
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="danger"
-                          onClick={() => {
-                            closeMenu();
-                            onDeleteWsRequest(ws);
-                          }}
-                        >
-                          删除工作区
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-              {!collapsed && <ConvList items={items} {...listProps} />}
-            </section>
-          );
-        })}
+        {visibleFolders.map(renderFolder)}
+        {topLevelWs.map((ws) => renderWs(ws))}
 
         {(!q || ungrouped.length > 0) && (
           <section className="ws-group" data-ws={UNGROUPED_KEY}>
@@ -1847,7 +2141,7 @@ function Sidebar(props) {
           </section>
         )}
 
-        {q && visibleWsCount === 0 && ungrouped.length === 0 && (
+        {q && visibleWsCount === 0 && visibleFolders.length === 0 && ungrouped.length === 0 && (
           <p className="conv-empty">未找到匹配的会话或工作区</p>
         )}
       </div>
@@ -2237,13 +2531,22 @@ export default function App() {
           activeId: store.activeId,
           workspaces: store.workspaces || [],
           wsNames: store.wsNames || {},
+          wsFolders: store.wsFolders || [],
+          wsFolderId: store.wsFolderId || {},
         }),
       );
       setSaveError(null);
     } catch {
       setSaveError('无法写入本地存储，本次改动可能不会被保存。');
     }
-  }, [store.conversations, store.activeId, store.workspaces, store.wsNames]);
+  }, [
+    store.conversations,
+    store.activeId,
+    store.workspaces,
+    store.wsNames,
+    store.wsFolders,
+    store.wsFolderId,
+  ]);
 
   // ---- CLI 状态 ----
   useEffect(() => {
@@ -2506,6 +2809,64 @@ export default function App() {
     });
   }, []);
 
+  // ---- 工作区文件夹：wsFolders 列表 + wsFolderId 归属映射 ----
+  const createWsFolder = useCallback((name) => {
+    const n = (name || '').trim().slice(0, 80) || '文件夹';
+    const f = { id: makeId(), name: n };
+    setStore((s) => ({ ...s, wsFolders: [...(s.wsFolders || []), f] }));
+    return f;
+  }, []);
+
+  const renameWsFolder = useCallback((id, name) => {
+    setStore((s) => ({
+      ...s,
+      wsFolders: (s.wsFolders || []).map((f) =>
+        f.id === id ? { ...f, name: name.trim().slice(0, 80) || f.name } : f,
+      ),
+    }));
+  }, []);
+
+  // 删除文件夹：成员工作区回落顶层（不删工作区本身与其下对话）。
+  const deleteWsFolder = useCallback((id) => {
+    setStore((s) => {
+      const wsFolderId = { ...(s.wsFolderId || {}) };
+      for (const k of Object.keys(wsFolderId)) {
+        if (wsFolderId[k] === id) delete wsFolderId[k];
+      }
+      return {
+        ...s,
+        wsFolders: (s.wsFolders || []).filter((f) => f.id !== id),
+        wsFolderId,
+      };
+    });
+    setLayout((l) => ({
+      ...l,
+      collapsedWorkspaces: l.collapsedWorkspaces.filter((k) => k !== `wf:${id}`),
+    }));
+  }, []);
+
+  // 移动工作区到文件夹（null = 移回顶层）。
+  const moveWsToFolder = useCallback((ws, folderId) => {
+    setStore((s) => {
+      const wsFolderId = { ...(s.wsFolderId || {}) };
+      if (folderId) wsFolderId[ws] = folderId;
+      else delete wsFolderId[ws];
+      return { ...s, wsFolderId };
+    });
+    if (folderId) {
+      setLayout((l) =>
+        l.collapsedWorkspaces.includes(`wf:${folderId}`)
+          ? {
+              ...l,
+              collapsedWorkspaces: l.collapsedWorkspaces.filter(
+                (k) => k !== `wf:${folderId}`,
+              ),
+            }
+          : l,
+      );
+    }
+  }, []);
+
   // 删除工作区分组：连同其下对话一并移除本地记录；不动工作区文件与 Devin 会话。
   const confirmDeleteWs = useCallback(() => {
     if (!delWs) return;
@@ -2517,11 +2878,14 @@ export default function App() {
       const remaining = s.conversations.filter((c) => c.workspace !== ws);
       const wsNames = { ...(s.wsNames || {}) };
       delete wsNames[ws];
+      const wsFolderId = { ...(s.wsFolderId || {}) };
+      delete wsFolderId[ws];
       return {
         ...s,
         conversations: remaining,
         workspaces: (s.workspaces || []).filter((w) => w !== ws),
         wsNames,
+        wsFolderId,
         activeId: remaining.some((c) => c.id === s.activeId)
           ? s.activeId
           : (remaining[0]?.id ?? null),
@@ -3187,6 +3551,8 @@ export default function App() {
               activeId={store.activeId}
               workspaces={effectiveWorkspaces}
               wsNames={store.wsNames || {}}
+              wsFolders={store.wsFolders || []}
+              wsFolderId={store.wsFolderId || {}}
               collapsedKeys={layout.collapsedWorkspaces}
               onNewChat={newChat}
               onSwitch={switchConv}
@@ -3199,6 +3565,10 @@ export default function App() {
               onToggleGroup={toggleWsGroup}
               onRenameWs={renameWs}
               onDeleteWsRequest={setDelWs}
+              onCreateFolder={createWsFolder}
+              onRenameFolder={renameWsFolder}
+              onDeleteFolder={deleteWsFolder}
+              onMoveWs={moveWsToFolder}
             />
           </nav>
         )}

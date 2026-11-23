@@ -588,7 +588,25 @@ export function parseStored(raw) {
             .filter(([k, v]) => k.startsWith('/') && v),
         )
       : {};
-  return { conversations, activeId, workspaces, wsNames };
+  // 工作区文件夹：{id,name} 列表 + 路径→folderId 归属映射（旧存档无此字段）。
+  const wsFolders = Array.isArray(data.wsFolders)
+    ? data.wsFolders
+        .filter((f) => f && typeof f === 'object' && typeof f.id === 'string')
+        .map((f) => ({
+          id: f.id.slice(0, 64),
+          name: (typeof f.name === 'string' ? f.name.trim() : '').slice(0, 80) || '文件夹',
+        }))
+    : [];
+  const folderIds = new Set(wsFolders.map((f) => f.id));
+  const wsFolderId =
+    data.wsFolderId && typeof data.wsFolderId === 'object' && !Array.isArray(data.wsFolderId)
+      ? Object.fromEntries(
+          Object.entries(data.wsFolderId).filter(
+            ([k, v]) => k.startsWith('/') && folderIds.has(v),
+          ),
+        )
+      : {};
+  return { conversations, activeId, workspaces, wsNames, wsFolders, wsFolderId };
 }
 
 // 组装 /api/chat 请求体：work 携带会话级 modelConfig（'' = 跟随默认，
