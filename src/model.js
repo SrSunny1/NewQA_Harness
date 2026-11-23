@@ -153,7 +153,8 @@ export function createNote(anchor, color = 'yellow') {
 }
 
 export function createBranch(anchor) {
-  return { id: makeId(), anchor, turns: [], collapsed: false };
+  // sessionId：支线自己的 Devin 会话（work 通道原生续聊）；首轮为空 → session/new
+  return { id: makeId(), anchor, turns: [], collapsed: false, sessionId: null };
 }
 
 export function titleFromQuestion(question) {
@@ -252,6 +253,34 @@ export function appendTurn(turns, path, turn) {
         b.id === id ? { ...b, turns: appendTurn(b.turns, rest, turn) } : b,
       ),
     };
+  });
+}
+
+// 按路径取支线节点的 Devin 会话 id（无支线/未建立 → null）。
+export function branchSessionAt(turns, path) {
+  if (!Array.isArray(path) || !path.length) return null;
+  let list = turns;
+  let node = null;
+  for (const id of path) {
+    const t = (list || []).find((x) => x.branches?.some((b) => b.id === id));
+    if (!t) return null;
+    node = t.branches.find((b) => b.id === id);
+    list = node.turns;
+  }
+  return typeof node?.sessionId === 'string' && node.sessionId ? node.sessionId : null;
+}
+
+// 深度不可变：把 sessionId 写到 path 指向的支线节点上（不动回合内容）。
+export function setBranchSession(turns, path, sessionId) {
+  if (!Array.isArray(path) || !path.length) return turns;
+  const [id, ...rest] = path;
+  return turns.map((t) => {
+    const branch = t.branches.find((b) => b.id === id);
+    if (!branch) return t;
+    const nb = rest.length
+      ? { ...branch, turns: setBranchSession(branch.turns, rest, sessionId) }
+      : { ...branch, sessionId };
+    return { ...t, branches: t.branches.map((b) => (b.id === id ? nb : b)) };
   });
 }
 
@@ -524,6 +553,10 @@ function asTurn(raw) {
                   anchor: asAnchor(b.anchor),
                   turns: Array.isArray(b.turns) ? b.turns.map(asTurn).filter(Boolean) : [],
                   collapsed: !!b.collapsed,
+                  sessionId:
+                    typeof b.sessionId === 'string' && b.sessionId
+                      ? b.sessionId.slice(0, 256)
+                      : null,
                 }
               : null,
           )
@@ -646,14 +679,23 @@ export function parseStored(raw) {
 
 // 组装 /api/chat 请求体：work 携带会话级 modelConfig（'' = 跟随默认，
 // 服务端跳过下发）；discussion 完全省略该字段。
-export function buildChatBody({ conv, kind, history, question, quote = '', images = [] }) {
+// sessionId 覆盖：支线回合传自己的会话 id（主线传 undefined 用 conv.sessionId）。
+export function buildChatBody({
+  conv,
+  kind,
+  history,
+  question,
+  quote = '',
+  images = [],
+  sessionId,
+}) {
   const body = {
     history,
     question,
     quote,
     workspace: conv.workspace || '',
     convId: conv.id || '',
-    sessionId: kind === 'work' ? conv.sessionId : null,
+    sessionId: kind === 'work' ? (sessionId === undefined ? conv.sessionId : sessionId) : null,
     kind,
     permissionMode: conv.permissionMode || 'accept-edits',
   };

@@ -394,7 +394,7 @@ test('dom：work 回合 POST body 携带 modelConfig', async () => {
   assert.ok(container.textContent.includes('答：你好'), '回答上屏');
 });
 
-test('dom：支线 discussion 的 POST body 不含 modelConfig', async () => {
+test('dom：支线走 work 通道——独立会话 id、不污染主线 sessionId', async () => {
   const block = container.querySelector('.source-block[data-block="0"]');
   assert.ok(block, '有已渲染的回答块');
   const range = window.document.createRange();
@@ -415,14 +415,42 @@ test('dom：支线 discussion 的 POST body 不含 modelConfig', async () => {
   assert.ok(branchTa, '支线输入框出现');
   // 支线输入框无斜杠面板（combo 未启用）
   assert.equal(branchTa.getAttribute('role'), null);
-  await setText(branchTa, '追问一下');
-  await key(branchTa, 'Enter');
-  await act(async () => {
-    await tick(30);
-  });
-  const body = chatCalls[chatCalls.length - 1].body;
-  assert.equal(body.kind, 'discussion');
-  assert.ok(!('modelConfig' in body), 'discussion 请求不含 modelConfig');
+  // 支线回合用自己的 sessionId：quote 非空 → 'br-sess-1'，否则主线 'main-sess-9'
+  chatResponder = (body) =>
+    ndjson([
+      { type: 'delta', text: '答' },
+      { type: 'done', sessionId: body.quote ? 'br-sess-1' : 'main-sess-9' },
+    ]);
+  try {
+    await setText(branchTa, '追问一下');
+    await key(branchTa, 'Enter');
+    await act(async () => {
+      await tick(30);
+    });
+    const body = chatCalls[chatCalls.length - 1].body;
+    assert.equal(body.kind, 'work', '支线回合走 work（完整 agent 能力）');
+    assert.ok('modelConfig' in body, 'work 请求带 modelConfig');
+    assert.equal(body.sessionId, null, '支线首轮无会话 → session/new');
+    assert.ok(body.quote, '支线携带选段引用');
+    // done 的 br-sess-1 写回支线节点；主线 sessionId 不被覆盖
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv = stored.conversations.find((x) => x.turns.some((t) => t.branches?.length));
+    const br = conv.turns.flatMap((t) => t.branches).find((b) => b.turns.length);
+    assert.equal(br.sessionId, 'br-sess-1', '支线会话 id 持久化到支线节点');
+    assert.notEqual(conv.sessionId, 'br-sess-1', '主线 sessionId 未被支线覆盖');
+    // 第二条支线追问 → 携带支线自己的 sessionId 原生续聊
+    const branchTa2 = container.querySelector('.branch-ui .composer-input');
+    await setText(branchTa2, '再问一层');
+    await key(branchTa2, 'Enter');
+    await act(async () => {
+      await tick(30);
+    });
+    const body2 = chatCalls[chatCalls.length - 1].body;
+    assert.equal(body2.sessionId, 'br-sess-1', '支线续聊复用自己的会话');
+    assert.equal(body2.kind, 'work');
+  } finally {
+    chatResponder = null;
+  }
 });
 
 test('dom：回合进行中模型下拉禁用，完成后恢复', async () => {

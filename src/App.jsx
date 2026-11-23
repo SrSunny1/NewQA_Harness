@@ -29,6 +29,8 @@ import {
   titleFromQuestion,
   historyForRequest,
   branchContextEntries,
+  branchSessionAt,
+  setBranchSession,
   appendTurn,
   addBranchToTurn,
   addNoteToTurn,
@@ -1047,7 +1049,7 @@ function BranchPanel(props) {
               props.onSend(props.convId, bp, q, branch.anchor.quote, draftKey, ims)
             }
             disabled={props.busy}
-            placeholder="围绕这段选文继续追问……"
+            placeholder="围绕这段选文继续追问或交办任务……"
             label="支线追问输入框"
             autoFocus={props.focusBranchId === branch.id}
           />
@@ -3323,7 +3325,10 @@ export default function App() {
     }
     const c = storeRef.current.conversations.find((x) => x.id === convId);
     if (!c) return;
-    const kind = path.length ? 'discussion' : 'work';
+    // 支线也走 work：完整 agent 能力（工具/权限/模型配置），但用支线自己的
+    // Devin 会话（branch.sessionId），与主线 session 相互隔离。
+    const kind = 'work';
+    const sessId = path.length ? branchSessionAt(c.turns, path) : c.sessionId;
     let history;
     try {
       // 斜杠命令原文下发：打进 envelope 会让 Devin 认不出 /compact 等命令。
@@ -3331,7 +3336,7 @@ export default function App() {
       // 但支线内容原生会话没有——只补支线记录；无支线时仍是空历史。
       history = question.trimStart().startsWith('/')
         ? []
-        : kind === 'work' && c.sessionId
+        : sessId
           ? branchContextEntries(c.turns)
           : historyForRequest(c.turns, path);
     } catch {
@@ -3378,7 +3383,15 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          buildChatBody({ conv: c, kind, history, question, quote, images }),
+          buildChatBody({
+            conv: c,
+            kind,
+            history,
+            question,
+            quote,
+            images,
+            sessionId: sessId,
+          }),
         ),
         signal: controller.signal,
       });
@@ -3468,6 +3481,12 @@ export default function App() {
             imageUrls,
             model: doneModel,
           });
+          const appended = appendTurn(c2.turns, path, turn);
+          // 支线回合的会话 id 写回支线节点（主线仍写会话级 sessionId）
+          const newTurns =
+            path.length && doneSessionId
+              ? setBranchSession(appended, path, doneSessionId)
+              : appended;
           return {
             ...c2,
             title:
@@ -3475,12 +3494,12 @@ export default function App() {
                 ? titleFromQuestion(question)
                 : c2.title,
             sessionId:
-              kind === 'work' && doneSessionId ? doneSessionId : c2.sessionId,
+              !path.length && doneSessionId ? doneSessionId : c2.sessionId,
             // 本轮实际生效模型持久化到会话（done 未上报时沿用上次值）
             effectiveModel: doneModel || c2.effectiveModel || null,
             effFor: doneModel ? modelAtSend : c2.effFor || '',
             effSpeed: doneModel ? speedAtSend : c2.effSpeed || '',
-            turns: appendTurn(c2.turns, path, turn),
+            turns: newTurns,
           };
         }),
       }));
