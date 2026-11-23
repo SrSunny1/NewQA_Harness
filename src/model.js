@@ -588,16 +588,39 @@ export function parseStored(raw) {
             .filter(([k, v]) => k.startsWith('/') && v),
         )
       : {};
-  // 工作区文件夹：{id,name} 列表 + 路径→folderId 归属映射（旧存档无此字段）。
+  // 工作区文件夹：{id,name,parentId} 列表 + 路径→folderId 归属映射（旧存档无此字段）。
   const wsFolders = Array.isArray(data.wsFolders)
     ? data.wsFolders
         .filter((f) => f && typeof f === 'object' && typeof f.id === 'string')
         .map((f) => ({
           id: f.id.slice(0, 64),
           name: (typeof f.name === 'string' ? f.name.trim() : '').slice(0, 80) || '文件夹',
+          parentId: typeof f.parentId === 'string' ? f.parentId.slice(0, 64) : null,
         }))
     : [];
   const folderIds = new Set(wsFolders.map((f) => f.id));
+  const folderById = new Map(wsFolders.map((f) => [f.id, f]));
+  // parentId 悬空置顶层；沿父链检测环（含自指），断掉闭环的那条边。
+  for (const f of wsFolders) {
+    if (!folderIds.has(f.parentId)) f.parentId = null;
+  }
+  for (const f of wsFolders) {
+    const seen = new Set([f.id]);
+    let cur = f;
+    while (cur.parentId) {
+      const p = folderById.get(cur.parentId);
+      if (!p) {
+        cur.parentId = null;
+        break;
+      }
+      if (seen.has(p.id)) {
+        cur.parentId = null;
+        break;
+      }
+      seen.add(p.id);
+      cur = p;
+    }
+  }
   const wsFolderId =
     data.wsFolderId && typeof data.wsFolderId === 'object' && !Array.isArray(data.wsFolderId)
       ? Object.fromEntries(

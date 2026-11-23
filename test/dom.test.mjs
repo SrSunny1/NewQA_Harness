@@ -856,15 +856,62 @@ test('dom：工作区文件夹——新建/重命名/菜单移入/删除回落�
   );
   assert.equal(topGroups().length, 0, '顶层无散落工作区');
 
-  // 删除文件夹 → 成员回落顶层，不删工作区/会话
+  // 在「项目集」里建子文件夹并重命名
   await click(container.querySelector('.ws-folder .conv-menu-btn'));
-  await click(findBtn(/删除文件夹/));
-  assert.ok(!container.querySelector('.ws-folder'), '文件夹已删');
-  assert.equal(topGroups().length, 2, '两个工作区回落顶层');
-  const stored3 = JSON.parse(window.localStorage.getItem('newqa:v1'));
-  assert.deepEqual(stored3.wsFolders, []);
-  assert.deepEqual(stored3.wsFolderId, {});
-  assert.equal(stored3.workspaces.length, 2, '工作区注册表未受影响');
+  await click(menuBtn(/新建子文件夹/));
+  const childInput = container.querySelector(
+    '.ws-folder .ws-folder .conv-rename input',
+  );
+  assert.ok(childInput, '子文件夹重命名输入出现在嵌套层');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(
+      childInput,
+      '子集',
+    );
+    childInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  await key(childInput, 'Enter');
+  assert.equal(
+    container.querySelectorAll('.ws-folder .ws-folder').length,
+    1,
+    '项目集内出现子文件夹',
+  );
+  const storedNest = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  const childF = storedNest.wsFolders.find((f) => f.name === '子集');
+  assert.ok(childF, '子文件夹持久化');
+  const parentF = storedNest.wsFolders.find((f) => f.name === '项目集');
+  assert.equal(childF.parentId, parentF.id, '子文件夹指向父级');
+
+  // ws-b 移入子文件夹（经 ⋯ 二级页，按精确名点选）
+  const wsB2 = container.querySelector('.ws-group[data-ws="/tmp/ws-b"]');
+  await click(wsB2.querySelector('.conv-menu-btn'));
+  await click(menuBtn(/移动到文件夹/));
+  const childEntry = [...container.querySelectorAll('.conv-menu button')].find(
+    (b) => b.textContent.trim() === '子集',
+  );
+  assert.ok(childEntry, '二级页列出子文件夹');
+  await click(childEntry);
+  const storedNest2 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(storedNest2.wsFolderId['/tmp/ws-b'], childF.id, 'ws-b 归入子集');
+
+  // 删除父级「项目集」：ws-a 回落顶层；子集上挂为顶层且 ws-b 仍归其下
+  const parentSection = container.querySelector('.ws-groups > .ws-folder');
+  await click(parentSection.querySelector('.conv-menu-btn'));
+  await click(menuBtn(/删除文件夹/));
+  const storedEnd = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(
+    container.querySelectorAll('.ws-groups > .ws-folder').length,
+    1,
+    '子集上挂为顶层文件夹',
+  );
+  assert.equal(topGroups().length, 1, 'ws-a 回落顶层');
+  assert.equal(storedEnd.wsFolderId['/tmp/ws-b'], childF.id, 'ws-b 仍在子集下');
+  assert.ok(!storedEnd.wsFolderId['/tmp/ws-a'], 'ws-a 归属清除');
+  assert.equal(
+    storedEnd.wsFolders.find((f) => f.id === childF.id)?.parentId,
+    null,
+    '子集父级置空',
+  );
 });
 
 test('dom：清理', async () => {

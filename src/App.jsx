@@ -1637,6 +1637,7 @@ function Sidebar(props) {
     onRenameFolder,
     onDeleteFolder,
     onMoveWs,
+    onMoveFolder,
   } = props;
   const [query, setQuery] = useState('');
   const [openMenu, setOpenMenu] = useState(null);
@@ -1645,6 +1646,7 @@ function Sidebar(props) {
   const [renamingFolder, setRenamingFolder] = useState(null);
   const [folderRenameVal, setFolderRenameVal] = useState('');
   const [wsMoveFor, setWsMoveFor] = useState(null); // 「移动到文件夹」二级页所在工作区
+  const [folderMoveFor, setFolderMoveFor] = useState(null); // 二级页所在文件夹
   const [dropTarget, setDropTarget] = useState(null); // folderId | 'root' | null
   const wsName = (ws) => wsNames[ws] || baseName(ws);
 
@@ -1655,6 +1657,7 @@ function Sidebar(props) {
 
   useEffect(() => {
     setWsMoveFor(null);
+    setFolderMoveFor(null);
     if (!openMenu) return;
     const onDown = (e) => {
       if (e.target.closest?.('.conv-menu, .conv-menu-btn')) return;
@@ -1701,10 +1704,15 @@ function Sidebar(props) {
   let visibleWsCount = 0;
 
   const folderIdSet = new Set(wsFolders.map((f) => f.id));
-  // 归属缺失/悬空的映射一律按顶层工作区处理（双保险，持久层已过滤）。
+  // parentId 悬空一律按顶层处理（双保险，持久层已过滤/断环）。
+  const parentOf = (f) =>
+    f.parentId && folderIdSet.has(f.parentId) ? f.parentId : null;
+  // 归属缺失/悬空的映射一律按顶层工作区处理。
   const topLevelWs = workspaces.filter(
     (w) => !wsFolderId[w] || !folderIdSet.has(wsFolderId[w]),
   );
+  const childFolders = (f) => wsFolders.filter((x) => parentOf(x) === f.id);
+  const topLevelFolders = wsFolders.filter((f) => !parentOf(f));
   const wsConvs = (ws) => conversations.filter((c) => c.workspace === ws);
   const nameHit = (ws) =>
     wsName(ws).toLowerCase().includes(q) || ws.toLowerCase().includes(q);
@@ -1719,12 +1727,43 @@ function Sidebar(props) {
       ? members.filter((w) => nameHit(w) || wsConvHit(w))
       : members;
   };
-  const visibleFolders = wsFolders.filter(
-    (f) => !q || folderHit(f) || folderShownMembers(f).length > 0,
-  );
+  // 子树命中：本名 / 直属工作区 / 任一后代文件夹命中 → 祖先链保持可见。
+  const subtreeHit = (f) =>
+    folderHit(f) ||
+    folderShownMembers(f).length > 0 ||
+    childFolders(f).some(subtreeHit);
+  // 子树忙碌：任意后代会话在生成 → 文件夹指示亮。
+  const subtreeBusy = (f) =>
+    folderMembers(f).some(wsBusy) || childFolders(f).some(subtreeBusy);
+  const visibleFolders = topLevelFolders.filter((f) => !q || subtreeHit(f));
+  // 「移动到…」二级页的扁平列表（先序 + 深度缩进）。
+  const flatFolders = [];
+  const walkFlat = (pid, depth) => {
+    for (const f of wsFolders.filter((x) => parentOf(x) === pid)) {
+      flatFolders.push({ f, depth });
+      walkFlat(f.id, depth + 1);
+    }
+  };
+  walkFlat(null, 0);
+  // 文件夹自身 + 后代 id 集（移动目标排除，防环）。
+  const subtreeIds = (id) => {
+    const out = new Set([id]);
+    for (;;) {
+      let grew = false;
+      for (const f of wsFolders) {
+        if (f.parentId && out.has(f.parentId) && !out.has(f.id)) {
+          out.add(f.id);
+          grew = true;
+        }
+      }
+      if (!grew) return out;
+    }
+  };
 
   const onWsDragOver = (e, target) => {
-    if (!e.dataTransfer.types.includes('application/x-newqa-ws')) return;
+    const t = e.dataTransfer.types;
+    if (!t.includes('application/x-newqa-ws') && !t.includes('application/x-newqa-folder'))
+      return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -1734,7 +1773,9 @@ function Sidebar(props) {
     e.preventDefault();
     e.stopPropagation();
     const ws = e.dataTransfer.getData('application/x-newqa-ws');
+    const fid = e.dataTransfer.getData('application/x-newqa-folder');
     if (ws) onMoveWs(ws, folderIdOrNull);
+    else if (fid && fid !== folderIdOrNull) onMoveFolder(fid, folderIdOrNull);
     setDropTarget(null);
   };
   const onDragLeave = (e) => {
@@ -1846,7 +1887,7 @@ function Sidebar(props) {
                         ‹ 返回
                       </button>
                       <div className="menu-label">移动到文件夹</div>
-                      {wsFolders.map((f) => (
+                      {flatFolders.map(({ f, depth }) => (
                         <button
                           type="button"
                           role="menuitem"
@@ -1857,6 +1898,7 @@ function Sidebar(props) {
                           }}
                         >
                           {wsFolderId[ws] === f.id ? '✓ ' : ''}
+                          {' '.repeat(depth)}
                           {f.name}
                         </button>
                       ))}
@@ -1919,14 +1961,17 @@ function Sidebar(props) {
     );
   };
 
-  // 工作区文件夹分组：可折叠、可重命名/删除（成员回落顶层）、可作拖放目标。
+  // 工作区文件夹分组：可折叠、可重命名/删除（成员上挂一级）、可嵌套、可作拖放目标。
   const renderFolder = (f) => {
     const members = folderShownMembers(f);
     const memberAll = folderMembers(f);
-    const collapsed = q ? false : collapsedKeys.includes(`wf:${f.id}`);
-    const anyBusy = memberAll.some(wsBusy);
-    const fMenuOpen = openMenu?.kind === 'folder' && openMenu.id === f.id;
+    const kidsAll = childFolders(f);
     const hit = q && folderHit(f);
+    const kids = q && !hit ? kidsAll.filter(subtreeHit) : kidsAll;
+    const collapsed = q ? false : collapsedKeys.includes(`wf:${f.id}`);
+    const anyBusy = subtreeBusy(f);
+    const fMenuOpen = openMenu?.kind === 'folder' && openMenu.id === f.id;
+    const moveBad = folderMoveFor === f.id ? subtreeIds(f.id) : null;
     return (
       <section
         className={`ws-folder ${dropTarget === f.id ? 'drop' : ''}`}
@@ -1935,7 +1980,15 @@ function Sidebar(props) {
         onDragLeave={onDragLeave}
         onDrop={(e) => onWsDrop(e, f.id)}
       >
-        <div className="ws-group-head">
+        <div
+          className="ws-group-head"
+          draggable={renamingFolder !== f.id}
+          onDragStart={(e) => {
+            e.dataTransfer.setData('application/x-newqa-folder', f.id);
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragEnd={() => setDropTarget(null)}
+        >
           {renamingFolder === f.id ? (
             <span className="conv-rename" role="form" aria-label="重命名文件夹">
               <input
@@ -1998,28 +2051,96 @@ function Sidebar(props) {
                   role="menu"
                   aria-label={`文件夹「${f.name}」`}
                 >
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      closeMenu();
-                      setRenamingFolder(f.id);
-                      setFolderRenameVal(f.name);
-                    }}
-                  >
-                    重命名
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="danger"
-                    onClick={() => {
-                      closeMenu();
-                      onDeleteFolder(f.id);
-                    }}
-                  >
-                    删除文件夹
-                  </button>
+                  {folderMoveFor === f.id ? (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setFolderMoveFor(null)}
+                      >
+                        ‹ 返回
+                      </button>
+                      <div className="menu-label">移动到文件夹</div>
+                      {flatFolders
+                        .filter(({ f: t }) => !moveBad.has(t.id))
+                        .map(({ f: t, depth }) => (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            key={t.id}
+                            onClick={() => {
+                              onMoveFolder(f.id, t.id);
+                              closeMenu();
+                            }}
+                          >
+                            {parentOf(f) === t.id ? '✓ ' : ''}
+                            {' '.repeat(depth)}
+                            {t.name}
+                          </button>
+                        ))}
+                      {parentOf(f) && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            onMoveFolder(f.id, null);
+                            closeMenu();
+                          }}
+                        >
+                          移到顶层
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          closeMenu();
+                          setRenamingFolder(f.id);
+                          setFolderRenameVal(f.name);
+                        }}
+                      >
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          closeMenu();
+                          const child = onCreateFolder('新文件夹', f.id);
+                          if (child) {
+                            setRenamingFolder(child.id);
+                            setFolderRenameVal(child.name);
+                            if (collapsedKeys.includes(`wf:${f.id}`)) {
+                              onToggleGroup(`wf:${f.id}`);
+                            }
+                          }
+                        }}
+                      >
+                        新建子文件夹
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setFolderMoveFor(f.id)}
+                      >
+                        移动到文件夹…
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="danger"
+                        onClick={() => {
+                          closeMenu();
+                          onDeleteFolder(f.id);
+                        }}
+                      >
+                        删除文件夹
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </>
@@ -2027,10 +2148,11 @@ function Sidebar(props) {
         </div>
         {!collapsed && (
           <div className="ws-folder-body">
+            {kids.map(renderFolder)}
             {members.map((ws) => renderWs(ws, hit))}
-            {memberAll.length === 0 && (
+            {memberAll.length === 0 && kidsAll.length === 0 && (
               <p className="ws-folder-empty">
-                把工作区拖到此处，或经工作区 ⋯ 菜单移入
+                把工作区或文件夹拖到此处，也可经 ⋯ 菜单新建子文件夹
               </p>
             )}
           </div>
@@ -2809,10 +2931,12 @@ export default function App() {
     });
   }, []);
 
-  // ---- 工作区文件夹：wsFolders 列表 + wsFolderId 归属映射 ----
-  const createWsFolder = useCallback((name) => {
+  // ---- 工作区文件夹：wsFolders 列表（parentId 支持嵌套）+ wsFolderId 归属映射 ----
+  const createWsFolder = useCallback((name, parentId = null) => {
     const n = (name || '').trim().slice(0, 80) || '文件夹';
-    const f = { id: makeId(), name: n };
+    const valid =
+      parentId && (storeRef.current.wsFolders || []).some((x) => x.id === parentId);
+    const f = { id: makeId(), name: n, parentId: valid ? parentId : null };
     setStore((s) => ({ ...s, wsFolders: [...(s.wsFolders || []), f] }));
     return f;
   }, []);
@@ -2826,16 +2950,49 @@ export default function App() {
     }));
   }, []);
 
-  // 删除文件夹：成员工作区回落顶层（不删工作区本身与其下对话）。
+  // 移动文件夹到另一文件夹（null = 顶层）；目标为自身/后代时忽略（防环）。
+  const moveWsFolder = useCallback((id, parentId) => {
+    const fs = storeRef.current.wsFolders || [];
+    if (!fs.some((f) => f.id === id)) return;
+    if (parentId) {
+      const bad = new Set([id]);
+      for (;;) {
+        let grew = false;
+        for (const f of fs) {
+          if (f.parentId && bad.has(f.parentId) && !bad.has(f.id)) {
+            bad.add(f.id);
+            grew = true;
+          }
+        }
+        if (!grew) break;
+      }
+      if (bad.has(parentId)) return;
+    }
+    setStore((s) => ({
+      ...s,
+      wsFolders: (s.wsFolders || []).map((f) =>
+        f.id === id ? { ...f, parentId: parentId || null } : f,
+      ),
+    }));
+  }, []);
+
+  // 删除文件夹：成员工作区与子文件夹上挂到被删文件夹的父级（顶层则回顶层），不删数据。
   const deleteWsFolder = useCallback((id) => {
     setStore((s) => {
+      const gone = (s.wsFolders || []).find((f) => f.id === id);
+      const parentId = gone?.parentId || null;
       const wsFolderId = { ...(s.wsFolderId || {}) };
       for (const k of Object.keys(wsFolderId)) {
-        if (wsFolderId[k] === id) delete wsFolderId[k];
+        if (wsFolderId[k] === id) {
+          if (parentId) wsFolderId[k] = parentId;
+          else delete wsFolderId[k];
+        }
       }
       return {
         ...s,
-        wsFolders: (s.wsFolders || []).filter((f) => f.id !== id),
+        wsFolders: (s.wsFolders || [])
+          .filter((f) => f.id !== id)
+          .map((f) => (f.parentId === id ? { ...f, parentId } : f)),
         wsFolderId,
       };
     });
@@ -3569,6 +3726,7 @@ export default function App() {
               onRenameFolder={renameWsFolder}
               onDeleteFolder={deleteWsFolder}
               onMoveWs={moveWsToFolder}
+              onMoveFolder={moveWsFolder}
             />
           </nav>
         )}

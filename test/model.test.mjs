@@ -401,8 +401,8 @@ test('parseStored：wsFolders/wsFolderId 文件夹字段消毒 + 旧存档兼容
   });
   const s = parseStored(raw);
   assert.deepEqual(s.wsFolders, [
-    { id: 'f1', name: '工作' },
-    { id: 'f2', name: '文件夹' },
+    { id: 'f1', name: '工作', parentId: null },
+    { id: 'f2', name: '文件夹', parentId: null },
   ]);
   assert.deepEqual(s.wsFolderId, { '/a': 'f1', '/b': 'f2' });
   const old = parseStored(
@@ -410,6 +410,34 @@ test('parseStored：wsFolders/wsFolderId 文件夹字段消毒 + 旧存档兼容
   );
   assert.deepEqual(old.wsFolders, []);
   assert.deepEqual(old.wsFolderId, {});
+});
+
+test('parseStored：wsFolders 嵌套 parentId 保留；悬空/自指/成环断链', () => {
+  const s = parseStored(
+    JSON.stringify({
+      v: 1,
+      conversations: [{ id: 'c1', title: 'x', turns: [] }],
+      activeId: 'c1',
+      workspaces: [],
+      wsFolders: [
+        { id: 'p', name: '父' },
+        { id: 'a', name: '子', parentId: 'p' },
+        { id: 'b', name: '孙', parentId: 'a' },
+        { id: 'ghost', name: '悬空', parentId: 'nope' },
+        { id: 'self', name: '自指', parentId: 'self' },
+        { id: 'c1', name: '环1', parentId: 'c2' },
+        { id: 'c2', name: '环2', parentId: 'c1' },
+      ],
+    }),
+  );
+  const byId = Object.fromEntries(s.wsFolders.map((f) => [f.id, f]));
+  assert.equal(byId.a.parentId, 'p', '子级保留');
+  assert.equal(byId.b.parentId, 'a', '孙级保留');
+  assert.equal(byId.ghost.parentId, null, '悬空回落顶层');
+  assert.equal(byId.self.parentId, null, '自指断链');
+  // c1↔c2 环必断一条边；另一方向成合法父子关系即算修复
+  const broken = byId.c1.parentId === null || byId.c2.parentId === null;
+  assert.ok(broken, '环已断开');
 });
 
 test('parseStored：turn.images 缩略图消毒（非 dataURL/超长剔除，最多 4 张）', () => {
