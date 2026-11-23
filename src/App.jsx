@@ -137,7 +137,7 @@ const PASTE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 const PASTE_FILE_MAX = 15 * 1024 * 1024; // 原始文件硬上限
 const REENCODE_BYTES = 1.5 * 1024 * 1024; // 超过则重编码为 jpeg
 const SEND_MAX_SIDE = 1920;
-const THUMB_SIDE = 320;
+const THUMB_SIDE = 640; // 缩略图边长：兼顾存档体积与点击放大后的可读性
 
 function fileDataUrl(file) {
   return new Promise((res, rej) => {
@@ -739,6 +739,84 @@ function GitView({ changes }) {
   );
 }
 
+// 提问气泡附图：点击缩略图开灯箱放大，←/→ 切换，Esc/点空白关闭。
+function QImgs({ srcs }) {
+  const [zoom, setZoom] = useState(null);
+  useEffect(() => {
+    if (zoom == null) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setZoom(null);
+      else if (e.key === 'ArrowLeft') setZoom((z) => Math.max(0, z - 1));
+      else if (e.key === 'ArrowRight') setZoom((z) => Math.min(srcs.length - 1, z + 1));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [zoom, srcs.length]);
+  return (
+    <span className="q-imgs">
+      {srcs.map((src, i) => (
+        <button
+          key={i}
+          type="button"
+          className="q-img-btn"
+          aria-label={`放大查看附图 ${i + 1}`}
+          title="点击放大"
+          onClick={() => setZoom(i)}
+        >
+          <img src={src} alt={`附图 ${i + 1}`} />
+        </button>
+      ))}
+      {zoom != null && (
+        <span
+          className="lb-scrim"
+          role="dialog"
+          aria-modal="true"
+          aria-label="查看图片"
+          onClick={() => setZoom(null)}
+        >
+          <img
+            className="lb-img"
+            src={srcs[zoom]}
+            alt={`附图 ${zoom + 1} 大图`}
+            onClick={(e) => e.stopPropagation()}
+          />
+          {srcs.length > 1 && (
+            <>
+              <button
+                type="button"
+                className="lb-nav prev"
+                aria-label="上一张"
+                disabled={zoom === 0}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setZoom(zoom - 1);
+                }}
+              >
+                ‹
+              </button>
+              <button
+                type="button"
+                className="lb-nav next"
+                aria-label="下一张"
+                disabled={zoom === srcs.length - 1}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setZoom(zoom + 1);
+                }}
+              >
+                ›
+              </button>
+            </>
+          )}
+          <span className="lb-hint">
+            {srcs.length > 1 ? '←/→ 切换 · ' : ''}Esc 或点击空白处关闭
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
 function PendingView({ pending, onStop }) {
   const { items } = useMemo(
     () => renderTimeline(pending.text, pending.tools),
@@ -747,13 +825,7 @@ function PendingView({ pending, onStop }) {
   return (
     <article className="turn pending" aria-live="polite" aria-label="正在生成回答">
       <div className="turn-q">
-        {!!pending.images?.length && (
-          <span className="q-imgs">
-            {pending.images.map((src, i) => (
-              <img key={i} src={src} alt={`附图 ${i + 1}`} />
-            ))}
-          </span>
-        )}
+        {!!pending.images?.length && <QImgs srcs={pending.images} />}
         {pending.question}
       </div>
       <div className="turn-a">
@@ -840,13 +912,7 @@ function TurnView(props) {
   return (
     <article className="turn" data-turn={turn.id}>
       <div className="turn-q">
-        {!!turn.images?.length && (
-          <span className="q-imgs">
-            {turn.images.map((src, i) => (
-              <img key={i} src={src} alt={`附图 ${i + 1}`} />
-            ))}
-          </span>
-        )}
+        {!!turn.images?.length && <QImgs srcs={turn.images} />}
         {turn.question}
       </div>
       <div className="turn-a">
@@ -1173,6 +1239,7 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [sel, setSel] = useState(''); // 单击选中的子目录路径（空=未选中）
   const seqRef = useRef(0);
   const abortRef = useRef(null);
   const inputRef = useRef(null);
@@ -1197,6 +1264,7 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
       if (seq !== seqRef.current) return;
       setCur(j);
       setInput(j.path);
+      setSel('');
       if (listRef.current) listRef.current.scrollTop = 0;
     } catch (e) {
       if (e.name === 'AbortError' || seq !== seqRef.current) return;
@@ -1220,7 +1288,7 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
       const r = await fetch('/api/workspace/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: cur.path }),
+        body: JSON.stringify({ path: sel || cur.path }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || `检查失败（${r.status}）`);
@@ -1261,7 +1329,8 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
           </button>
         </div>
         <p className="dlg-hint">
-          WSL 下 Windows 盘符在 <code>/mnt</code>（如 E: 盘 → <code>/mnt/e</code>）。
+          单击选中 · 双击进入。WSL 下 Windows 盘符在 <code>/mnt</code>（如 E: 盘 →{' '}
+          <code>/mnt/e</code>）。
         </p>
         <div className="fp-shortcuts">
           <button type="button" className="mini-btn" onClick={() => browse('')}>
@@ -1294,11 +1363,15 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
                 <button
                   key={f.path}
                   type="button"
-                  className="fp-dir"
+                  className={`fp-dir ${sel === f.path ? 'sel' : ''}`}
                   role="option"
-                  aria-selected="false"
-                  title={f.path}
-                  onClick={() => browse(f.path)}
+                  aria-selected={sel === f.path}
+                  title={`${f.path}（双击进入）`}
+                  onClick={() => setSel(sel === f.path ? '' : f.path)}
+                  onDoubleClick={() => browse(f.path)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') browse(f.path);
+                  }}
                 >
                   📁 {f.name}
                 </button>
