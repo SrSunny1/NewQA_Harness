@@ -180,6 +180,14 @@ body {
   min-height: 0;
   position: relative;
 }
+/* 显式列位：侧栏收起（不渲染）时 main/index 仍落在中/右列，
+   避免自动放置把 main 塞进 0px 的第一列。 */
+.body > .main {
+  grid-column: 2;
+}
+.body > .index {
+  grid-column: 3;
+}
 
 .panel-toggle {
   display: inline-flex;
@@ -1685,6 +1693,10 @@ body {
 @media (max-width: 960px) {
   .body {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .body > .main,
+  .body > .index {
+    grid-column: auto;
   }
   .icon-btn {
     display: inline-flex;
