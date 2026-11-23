@@ -2835,6 +2835,32 @@ export default function App() {
     if (conv) ensureDevinOptions();
   }, [conv?.id, ensureDevinOptions]);
 
+  // 按所选模型探测真实可选项（思考档位/速度随模型而异，如 xhigh 只有部分
+  // 模型提供）；探测中/失败回落基础选项，不阻断设置界面。
+  const cfgModelSel = conv?.modelConfig?.model || '';
+  const [modelOptsCache, setModelOptsCache] = useState({}); // model → {status, config}
+  const modelOptsRequested = useRef(new Set());
+  useEffect(() => {
+    if (!cfgModelSel || isFusionValue(cfgModelSel)) return;
+    if (modelOptsRequested.current.has(cfgModelSel)) return;
+    modelOptsRequested.current.add(cfgModelSel);
+    fetch(`/api/devin/options?model=${encodeURIComponent(cfgModelSel)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('probe failed'))))
+      .then((j) =>
+        setModelOptsCache((m) => ({
+          ...m,
+          [cfgModelSel]: { status: 'ok', config: j?.config || {} },
+        })),
+      )
+      .catch(() =>
+        setModelOptsCache((m) => ({ ...m, [cfgModelSel]: { status: 'error' } })),
+      );
+  }, [cfgModelSel]);
+  const convOpts =
+    cfgModelSel && modelOptsCache[cfgModelSel]?.status === 'ok'
+      ? { ...devinOpts, config: modelOptsCache[cfgModelSel].config }
+      : devinOpts;
+
   // ---- 选区监听 ----
   useEffect(() => {
     const refresh = () => {
@@ -4093,7 +4119,7 @@ export default function App() {
                 />
                 <ModelBar
                   conv={conv}
-                  opts={devinOpts}
+                  opts={convOpts}
                   busy={busy}
                   onSelect={(key, value) =>
                     mutateConv(conv.id, (c) => ({

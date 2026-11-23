@@ -360,9 +360,9 @@ export function createServer({
   // 不带 convId 的请求共用 '' 键，保持旧的全局串行语义。
   const busyConvs = new Set();
   // /api/devin/options 探测结果缓存（仅成功才写入；失败不污染，下次重试）。
-  // inflight 去重并发请求，避免同一时刻 spawn 多个 devin acp。
-  let optionsCache = null; // { at, data }
-  let optionsInflight = null;
+  // 按模型分键：不同模型的可选项（思考档位/速度）不同；inflight 分键去重。
+  const optionsCaches = new Map(); // model('' = 基础) → { at, data }
+  const optionsInflights = new Map(); // model → Promise
   // 各并发回合的权限决策：requestId → {resolve, options}。无自动批准；
   // 回合结束只清理自己发出的那批（requestId 为 UUID，跨回合不冲突）。
   const pendingPerms = new Map();
@@ -683,18 +683,25 @@ export function createServer({
       }
       if (pathname === '/api/devin/options') {
         // 只读探测：斜杠命令清单 + 会话级配置项（model/thought_level/speed）。
+        // ?model=<uid> → 探测该模型实际提供的选项（按模型分键缓存）。
         // 不发送 prompt；成功缓存 5 分钟，失败 502 且不写缓存。
+        const modelQ = (url.searchParams.get('model') || '').slice(
+          0,
+          MODEL_CONFIG_VALUE_LIMIT,
+        );
         try {
-          if (optionsCache && Date.now() - optionsCache.at < OPTIONS_CACHE_TTL) {
-            return json(res, 200, optionsCache.data);
+          const hit = optionsCaches.get(modelQ);
+          if (hit && Date.now() - hit.at < OPTIONS_CACHE_TTL) {
+            return json(res, 200, hit.data);
           }
-          if (!optionsInflight) {
-            optionsInflight = probeOptions({ spawnImpl, cwd: defaultCwd }).finally(
-              () => (optionsInflight = null),
+          if (!optionsInflights.has(modelQ)) {
+            const p = probeOptions({ spawnImpl, cwd: defaultCwd, model: modelQ }).finally(
+              () => optionsInflights.delete(modelQ),
             );
+            optionsInflights.set(modelQ, p);
           }
-          const data = await optionsInflight;
-          optionsCache = { at: Date.now(), data };
+          const data = await optionsInflights.get(modelQ);
+          optionsCaches.set(modelQ, { at: Date.now(), data });
           return json(res, 200, data);
         } catch (e) {
           return json(res, 502, {

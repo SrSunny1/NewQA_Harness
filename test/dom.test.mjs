@@ -117,8 +117,25 @@ globalThis.fetch = async (url, init = {}) => {
   if (u === '/api/status') {
     return Response.json({ cli: 'ok', version: 'devin-test', defaultCwd: '/tmp/newqa' });
   }
-  if (u === '/api/devin/options') {
+  if (u === '/api/devin/options' || u.startsWith('/api/devin/options?')) {
     optionsCalls++;
+    // ?model=opus → 该模型的真实选项：思考档无 max、speed 不暴露
+    const q = new URL(u, 'http://x').searchParams.get('model');
+    if (q === 'opus') {
+      return Response.json({
+        ...OPTIONS,
+        config: {
+          model: OPTIONS.config.model,
+          thought_level: {
+            currentValue: 'medium',
+            options: [
+              { value: 'medium', name: 'Medium' },
+              { value: 'xhigh', name: 'XHigh' },
+            ],
+          },
+        },
+      });
+    }
     return Response.json(OPTIONS);
   }
   if (u === '/api/chat') {
@@ -317,9 +334,9 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
   // 默认项标签显示 Devin 当前默认（currentValue → name）
   const row = container.querySelector('.model-row');
   assert.match(row.textContent, /默认（Adaptive）/);
-  await select(m, 'opus');
   await select(t, 'low');
   await select(s, 'fast');
+  await select(m, 'opus');
   const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
   const conv = stored.conversations.find((c) => c.id === stored.activeId);
   assert.deepEqual(
@@ -330,6 +347,33 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
   // fusion-* 配对不进模型下拉（由 /fusion 选择器负责）
   const vals = [...m.options].map((o) => o.value);
   assert.ok(!vals.some((v) => v.startsWith('fusion-')), 'fusion 不在模型下拉');
+});
+
+test('dom：换模型后按 ?model= 探测，思考档显示该模型真实可选项', async () => {
+  const selects = container.querySelectorAll('.model-select');
+  const m = selects[0];
+  const t = selects[1];
+  // 上个用例已选 opus：思考档按该模型探测结果给出（无 max），
+  // 已存的 'low' 不在列表 → 兜底项保留显示
+  const vals0 = [...t.options].slice(1).map((o) => o.value);
+  assert.deepEqual(vals0, ['medium', 'xhigh', 'low']);
+  await select(t, 'xhigh');
+  const stored1 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(
+    stored1.conversations.find((c) => c.id === stored1.activeId).modelConfig
+      .thought_level,
+    'xhigh',
+  );
+  // 换 adaptive → 新的 ?model= 探测落地：基础档位恢复 + 'xhigh' 兜底项
+  await select(m, 'adaptive');
+  assert.deepEqual(
+    [...t.options].slice(1).map((o) => o.value),
+    ['low', 'high', 'max', 'xhigh'],
+    '思考档随所选模型刷新，不支持值以兜底项保留',
+  );
+  // 还原为上个用例留下的 {opus, low, fast}，避免污染后续用例
+  await select(t, 'low');
+  await select(m, 'opus');
 });
 
 test('dom：/fusion 弹双列选择器，Tab 切列、Enter 确认写入 modelConfig', async () => {

@@ -225,6 +225,10 @@ export function probeScript({
   ],
   notifyCommands = true,
   notifyDelay = 0,
+  // setConfigOptions：model 探测时 set_config_option 的响应 configOptions
+  // （可为 (params)=>opts 动态计算）；setConfigError 回 RPC 错误。
+  setConfigOptions = null,
+  setConfigError = null,
 } = {}) {
   return (msg, api) => {
     if (msg.method === 'initialize') {
@@ -242,6 +246,15 @@ export function probeScript({
           });
         if (notifyDelay) setTimeout(send, notifyDelay);
         else send();
+      }
+    } else if (msg.method === 'session/set_config_option') {
+      if (setConfigError) api.respondError(msg.id, setConfigError);
+      else {
+        const opts =
+          typeof setConfigOptions === 'function'
+            ? setConfigOptions(msg.params)
+            : setConfigOptions || configOptions;
+        api.respond(msg.id, { configOptions: opts });
       }
     }
   };

@@ -669,6 +669,55 @@ test('GET /api/devin/options：形状 + 5min 缓存 + 守卫拒绝', async () =>
   );
 });
 
+test('GET /api/devin/options?model=：按模型分键探测与缓存', async () => {
+  let spawns = 0;
+  const opusOpts = [
+    { id: 'model', currentValue: 'opus', options: [{ value: 'opus', name: 'Opus' }] },
+    {
+      id: 'thought_level',
+      currentValue: 'medium',
+      options: [
+        { value: 'medium', name: 'Medium' },
+        { value: 'xhigh', name: 'XHigh' },
+      ],
+    },
+  ];
+  await withServer(
+    async (base) => {
+      const r1 = await fetch(`${base}/api/devin/options?model=opus`);
+      assert.equal(r1.status, 200);
+      const j1 = await r1.json();
+      assert.deepEqual(
+        j1.config.thought_level.options.map((o) => o.value),
+        ['medium', 'xhigh'],
+      );
+      // 无参基础探测是另一把键：互不影响、各自缓存
+      const r2 = await fetch(`${base}/api/devin/options`);
+      assert.equal(r2.status, 200);
+      const j2 = await r2.json();
+      assert.deepEqual(
+        j2.config.thought_level.options.map((o) => o.value),
+        ['low', 'high'],
+      );
+      const r3 = await fetch(`${base}/api/devin/options?model=opus`);
+      assert.equal(r3.status, 200);
+      assert.equal(spawns, 2, '每个模型各探测一次并缓存');
+    },
+    {
+      spawnImpl: (c, a, o) => {
+        spawns++;
+        // 无 model 的探测不发 set_config_option → 基础选项；
+        // ?model=opus 的探测会发 → 回 opus 选项
+        return fakeSpawn(
+          probeScript({
+            setConfigOptions: (p) => (p.configId === 'model' ? opusOpts : []),
+          }),
+        )(c, a, o);
+      },
+    },
+  );
+});
+
 test('GET /api/devin/options：探测失败 → 502 中文错误，且不污染缓存', async () => {
   let fail = true;
   let spawns = 0;

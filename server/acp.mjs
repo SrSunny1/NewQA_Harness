@@ -487,7 +487,8 @@ export function runTurn({
           const value = modelConfig[configId];
           if (typeof value !== 'string' || !value) continue;
           // 该会话不暴露此选项（付费模型无 speed 项）→ 无法兑现，跳过不发；
-          // 选项存在但值不在列表 → 仍报错（fail closed，防静默错配）。
+          // 选项存在但值不在列表（部分模型无 xhigh/max 思考档）→ 同样跳过；
+          // model 例外：选错模型静默运行比报错更糟，保持 fail closed。
           // 空/缺失 configOptions 视为未知 → 照常下发，由服务端裁决。
           const optsKnown = Array.isArray(cfgOptions) && cfgOptions.length > 0;
           const opt = optsKnown
@@ -495,7 +496,7 @@ export function runTurn({
             : undefined;
           if (optsKnown && !opt) continue;
           if (
-            configId === 'speed' &&
+            configId !== 'model' &&
             Array.isArray(opt?.options) &&
             opt.options.length &&
             !opt.options.some((o) => o.value === value)
@@ -605,12 +606,15 @@ function probeResult(configOptions, availableCommands) {
 // 一次性探测：spawn `devin acp` → initialize → session/new → 收集
 // configOptions 与 available_commands_update 通知 → kill。
 // 不发送 prompt；命令通知超时按空列表处理（不视为错误）。
+// model 非空：session/new 后再 set_config_option model，读取该模型
+// 实际提供的选项（思考档位/速度随模型变化）；设置失败回落基础选项。
 // resolve { commands: [{name,description,hint,category}],
 //           config: {model?|thought_level?|speed?: {currentValue,options[]}} }
 export function probeOptions({
   spawnImpl = defaultSpawn,
   cwd = process.cwd(),
   timeouts = {},
+  model = '',
 } = {}) {
   return new Promise((resolve, reject) => {
     const requestTimeout = timeouts.request ?? RPC_TIMEOUT;
@@ -790,7 +794,23 @@ export function probeOptions({
           timers.add(t);
         });
       }
-      return probeResult(sess?.configOptions, commands);
+      // 按模型探测：切换后各选项的取值范围（含 thought_level 档位、speed 有无）
+      // 随模型改变；失败不阻断——回落基础选项比报错更有用。
+      let cfgOptions = sess?.configOptions;
+      const realSessionId = sess?.sessionId;
+      if (model && typeof realSessionId === 'string' && realSessionId) {
+        try {
+          const cfg = await request(
+            'session/set_config_option',
+            { sessionId: realSessionId, configId: 'model', value: model },
+            requestTimeout,
+          );
+          cfgOptions = cfg?.configOptions ?? cfgOptions;
+        } catch {
+          /* 模型不可用时保持默认会话的选项 */
+        }
+      }
+      return probeResult(cfgOptions, commands);
     })().then(ok, fail);
   });
 }

@@ -812,6 +812,37 @@ test('work：会话无 speed 选项（付费模型）→ speed 跳过不发、�
   assert.deepEqual(child.calls.at(-1), 'session/prompt');
 });
 
+test('work：thought_level 值不在该模型列表（如无 xhigh）→ 跳过不发', async () => {
+  // 该会话的 thought_level 只有 low/high——存量的 xhigh/max 无法兑现，
+  // 应跳过而不是让 set_config_option 报错终止回合；model 仍 fail closed。
+  const opts = [
+    { id: 'model', currentValue: 'opus', options: [{ value: 'opus' }] },
+    {
+      id: 'thought_level',
+      currentValue: 'high',
+      options: [{ value: 'low' }, { value: 'high' }],
+    },
+  ];
+  const spawn = fakeSpawn(
+    workScript({ newConfigOptions: opts, setConfigOptions: opts }),
+  );
+  let child;
+  const res = await runTurn({
+    ...BASE,
+    kind: 'work',
+    modelConfig: { model: 'opus', thought_level: 'xhigh', speed: '' },
+    spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+  });
+  const cfgs = child.msgs.filter((m) => m.method === 'session/set_config_option');
+  assert.deepEqual(
+    cfgs.map((m) => m.params.configId),
+    ['model'],
+    'thought_level=xhigh 不在列表 → 未下发',
+  );
+  assert.equal(res.text, '答');
+  assert.equal(child.calls.at(-1), 'session/prompt');
+});
+
 test('work：set_config_option RPC 错误 → fail closed，不发 prompt', async () => {
   const spawn = fakeSpawn(
     workScript({ setConfigError: { code: -32602, message: 'bad config value' } }),
@@ -978,6 +1009,45 @@ test('probeOptions：归一化 configOptions（过滤 mode）与 available_comma
   assert.equal(res.commands[2].hint, '');
   assert.equal(res.commands[2].category, '');
   assert.ok(child.killed, '探测完应 kill 子进程');
+});
+
+test('probeOptions：传 model → 先 set_config_option 再取该模型的选项', async () => {
+  // opus 会话只提供 medium/xhigh（无 max、无 speed 组）
+  const opusOpts = [
+    { id: 'model', currentValue: 'opus', options: [{ value: 'opus', name: 'Opus' }] },
+    {
+      id: 'thought_level',
+      currentValue: 'medium',
+      options: [
+        { value: 'medium', name: 'Medium' },
+        { value: 'xhigh', name: 'XHigh' },
+      ],
+    },
+  ];
+  const spawn = fakeSpawn(probeScript({ setConfigOptions: opusOpts }));
+  let child;
+  const res = await probeOptions({
+    spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+    model: 'opus',
+  });
+  const setCfg = child.msgs.find((m) => m.method === 'session/set_config_option');
+  assert.deepEqual(setCfg.params, {
+    sessionId: 'probe-session',
+    configId: 'model',
+    value: 'opus',
+  });
+  assert.deepEqual(
+    res.config.thought_level.options.map((o) => o.value),
+    ['medium', 'xhigh'],
+    '返回该模型实际提供的思考档',
+  );
+  assert.equal(res.config.speed, undefined, '该模型不暴露 speed 组');
+  // set_config_option 失败 → 回落 session/new 的基础选项，不报错
+  const spawnBad = fakeSpawn(
+    probeScript({ setConfigError: { code: -32602, message: 'bad model' } }),
+  );
+  const res2 = await probeOptions({ spawnImpl: spawnBad, model: 'nope' });
+  assert.equal(res2.config.model.currentValue, 'adaptive');
 });
 
 test('probeOptions：命令通知超时 → 空列表，不视为错误', async () => {
