@@ -1034,6 +1034,42 @@ test('dom：文件夹菜单「新建工作区…」→ 选目录后直接归入�
   );
 });
 
+test('dom：文件夹菜单「新建对话…」→ 二级页选工作区开新会话', async () => {
+  // 上个用例结束态：顶层文件夹「子集」，内含 ws-b 与 /tmp/x
+  const folderSection = container.querySelector('.ws-groups > .ws-folder');
+  await click(folderSection.querySelector('.conv-menu-btn'));
+  const menuBtn = (re) =>
+    [...container.querySelectorAll('.conv-menu button')].find((b) =>
+      re.test(b.textContent),
+    );
+  const chatItem = menuBtn(/^新建对话…$/);
+  assert.ok(chatItem, '文件夹菜单含「新建对话…」');
+  await click(chatItem);
+  // 二级页列出子树内全部工作区（ws-b、/tmp/x），ws-a 在顶层不应出现
+  const labels = [...container.querySelectorAll('.conv-menu button')].map((b) =>
+    b.textContent.trim(),
+  );
+  assert.ok(labels.includes('ws-b'), '二级页含 ws-b');
+  assert.ok(labels.includes('x'), '二级页含 /tmp/x（baseName）');
+  assert.ok(!labels.includes('ws-a'), '顶层 ws-a 不在候选里');
+  // 返回键可用
+  const before = JSON.parse(window.localStorage.getItem('newqa:v1')).conversations
+    .length;
+  await click(menuBtn(/^ws-b$/));
+  const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(stored.conversations.length, before + 1, '新会话已建');
+  const added = stored.conversations.find((c) => c.id === stored.activeId);
+  assert.equal(added.workspace, '/tmp/ws-b', '新会话挂在所选工作区');
+  // 菜单关闭且新会话渲染在 ws-b 组内
+  assert.ok(!container.querySelector('.conv-menu'), '菜单已关闭');
+  assert.equal(
+    container.querySelectorAll('.ws-group[data-ws="/tmp/ws-b"] .conv-item')
+      .length,
+    2,
+    'ws-b 组内出现两条会话',
+  );
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);

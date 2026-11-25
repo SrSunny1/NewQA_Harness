@@ -1771,6 +1771,7 @@ function Sidebar(props) {
   const [folderRenameVal, setFolderRenameVal] = useState('');
   const [wsMoveFor, setWsMoveFor] = useState(null); // 「移动到文件夹」二级页所在工作区
   const [folderMoveFor, setFolderMoveFor] = useState(null); // 二级页所在文件夹
+  const [folderChatFor, setFolderChatFor] = useState(null); // 「新建对话」二级页所在文件夹
   const [dropTarget, setDropTarget] = useState(null); // folderId | 'root' | null
   const wsName = (ws) => wsNames[ws] || baseName(ws);
 
@@ -1782,6 +1783,7 @@ function Sidebar(props) {
   useEffect(() => {
     setWsMoveFor(null);
     setFolderMoveFor(null);
+    setFolderChatFor(null);
     if (!openMenu) return;
     const onDown = (e) => {
       if (e.target.closest?.('.conv-menu, .conv-menu-btn')) return;
@@ -1859,6 +1861,11 @@ function Sidebar(props) {
   // 子树忙碌：任意后代会话在生成 → 文件夹指示亮。
   const subtreeBusy = (f) =>
     folderMembers(f).some(wsBusy) || childFolders(f).some(subtreeBusy);
+  // 子树全部成员工作区（直属 + 各层后代文件夹）——「新建对话」二级页候选。
+  const subtreeMembers = (f) => [
+    ...folderMembers(f),
+    ...childFolders(f).flatMap(subtreeMembers),
+  ];
   const visibleFolders = topLevelFolders.filter((f) => !q || subtreeHit(f));
   // 「移动到…」二级页的扁平列表（先序 + 深度缩进）。
   const flatFolders = [];
@@ -2216,8 +2223,48 @@ function Sidebar(props) {
                         </button>
                       )}
                     </>
+                  ) : folderChatFor === f.id ? (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setFolderChatFor(null)}
+                      >
+                        ‹ 返回
+                      </button>
+                      <div className="menu-label">在哪个工作区新建</div>
+                      {subtreeMembers(f).map((w) => (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          key={w}
+                          title={w}
+                          onClick={() => {
+                            closeMenu();
+                            onNewChat(w);
+                          }}
+                        >
+                          {wsName(w)}
+                        </button>
+                      ))}
+                      {subtreeMembers(f).length === 0 && (
+                        <span className="menu-empty">
+                          还没有工作区，先用「新建工作区…」添加
+                        </span>
+                      )}
+                    </>
                   ) : (
                     <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setFolderMoveFor(null);
+                          setFolderChatFor(f.id);
+                        }}
+                      >
+                        新建对话…
+                      </button>
                       <button
                         type="button"
                         role="menuitem"
