@@ -52,6 +52,7 @@ import {
   isBillableModel,
   isBillableSpeed,
   MAX_IMAGES,
+  INFLIGHT_KEY,
   THUMB_LIMIT,
 } from './model.js';
 import { slashToken, filterSlashCommands, acceptSlash } from './slash.js';
@@ -3421,100 +3422,64 @@ export default function App() {
   const onDraft = useCallback((key, v) => setDrafts((d) => ({ ...d, [key]: v })), []);
   const onImgs = useCallback((key, list) => setImgs((d) => ({ ...d, [key]: list })), []);
 
-  // ---- 发送 ----
-  const send = useCallback(async (convId, path, question, quote, draftKey, images = []) => {
-    // 同一会话仍串行（一个 Devin 会话不能并发 prompt）；不同会话放行。
-    for (const v of abortsRef.current.values()) {
-      if (v.convId === convId) {
-        setNotice({ kind: 'info', text: '该对话已有进行中的回合，请先停止或等待完成' });
-        return;
-      }
-    }
-    const c = storeRef.current.conversations.find((x) => x.id === convId);
-    if (!c) return;
-    // 支线也走 work：完整 agent 能力（工具/权限/模型配置），但用支线自己的
-    // Devin 会话（branch.sessionId），与主线 session 相互隔离。
-    const kind = 'work';
-    const sessId = path.length ? branchSessionAt(c.turns, path) : c.sessionId;
-    let history;
+  // ---- 进行中回合的断点续传（inflight 持久化）----
+  // send 时把回合元信息写进 localStorage；刷新后按 convId 向服务端
+  // /api/chat/attach 重放缓冲并追 live 流，回合在服务端从未中断。
+  const readInflight = () => {
     try {
-      // 斜杠命令原文下发：打进 envelope 会让 Devin 认不出 /compact 等命令。
-      // 原生续聊（work + 已有 sessionId）不回放主线（Devin 侧已有），
-      // 但支线内容原生会话没有——只补支线记录；无支线时仍是空历史。
-      history = question.trimStart().startsWith('/')
-        ? []
-        : sessId
-          ? branchContextEntries(c.turns)
-          : historyForRequest(c.turns, path);
+      const raw = JSON.parse(window.localStorage.getItem(INFLIGHT_KEY) || '[]');
+      if (!Array.isArray(raw)) return [];
+      return raw.filter(
+        (e) =>
+          e &&
+          typeof e.pid === 'string' &&
+          typeof e.convId === 'string' &&
+          typeof e.question === 'string' &&
+          Array.isArray(e.path),
+      );
     } catch {
-      setNotice({ kind: 'error', text: '无法定位该支线上下文' });
-      return;
+      return [];
     }
-    const pid = makeId();
-    const controller = new AbortController();
-    abortsRef.current.set(pid, { controller, convId });
-    const thumbs = images.map((i) => i.thumb).filter(Boolean);
-    const imageUrls = images?.length ? await uploadAttachments(images) : null;
-    setPendings((ps) => [
-      ...ps,
-      {
-        id: pid,
-        convId,
-        path: [...path],
-        question,
-        text: '',
-        tools: [],
-        kind,
-        images: thumbs,
-        imageUrls,
-      },
-    ]);
-    // 提交即清空输入框与附图（内容已显示在回合气泡里）；失败时在 catch 回填。
-    if (draftKey) {
-      setDrafts((d) => ({ ...d, [draftKey]: '' }));
-      setImgs((d) => ({ ...d, [draftKey]: [] }));
-    }
+  };
+  const writeInflight = (list) => {
+    try {
+      if (list.length) window.localStorage.setItem(INFLIGHT_KEY, JSON.stringify(list));
+      else window.localStorage.removeItem(INFLIGHT_KEY);
+    } catch {}
+  };
+  const addInflight = (entry) => writeInflight([...readInflight(), entry]);
+  const removeInflight = (pid) =>
+    writeInflight(readInflight().filter((e) => e.pid !== pid));
+
+  // 消费 NDJSON 流（首发与重挂共用）：delta/tool/permission 上屏，
+  // done 提交完整回合；中断/错误存不完整回合；stopped 不存。
+  // 不抛出——所有收尾（含 inflight 清理）都在内部完成。
+  const consumeChatStream = useCallback(async (res, ctx) => {
+    const {
+      pid,
+      convId,
+      path,
+      question,
+      thumbs = [],
+      imageUrls = null,
+      draftKey = '',
+      modelAtSend = '',
+      speedAtSend = '',
+      controller,
+      restoreImages = null,
+    } = ctx;
     let acc = '';
     let toolsAcc = [];
     let changes = null;
     let doneSessionId = null;
     let doneModel = null; // done 上报的本轮实际生效模型
-    // 本轮使用的 model 选择快照：done 上报的生效值与"哪次选择"绑定，
-    // 选择变了就即时改显选中项，不变就显示真实解析值。
-    const modelAtSend =
-      typeof c.modelConfig?.model === 'string' ? c.modelConfig.model : '';
-    const speedAtSend =
-      typeof c.modelConfig?.speed === 'string' ? c.modelConfig.speed : '';
+    let finished = false;
+    let streamErr = null;
+    let stoppedSeen = false; // 服务端广播的主动停止
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          buildChatBody({
-            conv: c,
-            kind,
-            history,
-            question,
-            quote,
-            images,
-            sessionId: sessId,
-          }),
-        ),
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        let msg = `服务返回 ${res.status}`;
-        try {
-          const j = await res.json();
-          if (j?.error) msg = j.error;
-        } catch {}
-        throw new Error(msg);
-      }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
-      let finished = false;
-      let streamErr = null;
       const handleLine = (line) => {
         if (!line.trim()) return;
         let ev;
@@ -3558,6 +3523,8 @@ export default function App() {
           doneSessionId = typeof ev.sessionId === 'string' ? ev.sessionId : null;
           doneModel =
             typeof ev.model === 'string' && ev.model ? ev.model.slice(0, 128) : null;
+        } else if (ev.type === 'stopped') {
+          stoppedSeen = true;
         } else if (ev.type === 'error') {
           streamErr = ev.message || '发生未知错误';
         }
@@ -3613,7 +3580,7 @@ export default function App() {
       setPendings((ps) => ps.filter((p) => p.id !== pid));
       setPerms((ps) => ps.filter((x) => x.pid !== pid));
     } catch (e) {
-      const aborted = e.name === 'AbortError' || controller.signal.aborted;
+      const aborted = stoppedSeen || e.name === 'AbortError' || controller?.signal.aborted;
       if (aborted) {
         setNotice({ kind: 'info', text: '已停止生成，未保存本轮内容' });
       } else {
@@ -3651,14 +3618,232 @@ export default function App() {
       // 失败/停止且未存部分回合：输入框已清空，回填原文与附图便于修改后重试
       if (!savedPartial && draftKey) {
         setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
-        setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
+        if (restoreImages?.length) {
+          setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: restoreImages }));
+        }
       }
     } finally {
       abortsRef.current.delete(pid);
+      removeInflight(pid);
     }
   }, []);
 
-  const onStop = useCallback((pid) => abortsRef.current.get(pid)?.controller.abort(), []);
+  // 刷新/重进后重挂服务端仍在跑的回合：重放缓冲 + 追 live。
+  const reattachTurn = useCallback(
+    async (en) => {
+      if (abortsRef.current.has(en.pid)) return;
+      const controller = new AbortController();
+      abortsRef.current.set(en.pid, { controller, convId: en.convId });
+      setPendings((ps) =>
+        ps.some((p) => p.id === en.pid)
+          ? ps
+          : [
+              ...ps,
+              {
+                id: en.pid,
+                convId: en.convId,
+                path: en.path,
+                question: en.question,
+                text: '',
+                tools: [],
+                kind: 'work',
+                images: en.images || [],
+                imageUrls: en.imageUrls || null,
+              },
+            ],
+      );
+      let res;
+      try {
+        res = await fetch('/api/chat/attach', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ convId: en.convId }),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          setPendings((ps) => ps.filter((p) => p.id !== en.pid));
+          abortsRef.current.delete(en.pid);
+          removeInflight(en.pid);
+        }
+        return;
+      }
+      if (!res.ok || !res.body) {
+        // 404 = 服务端已无此回合（重启/回放过期）→ 丢弃残留标记
+        setPendings((ps) => ps.filter((p) => p.id !== en.pid));
+        abortsRef.current.delete(en.pid);
+        removeInflight(en.pid);
+        if (res.status === 404) {
+          setNotice({ kind: 'info', text: '有进行中的回合因服务重启未能恢复' });
+        }
+        return;
+      }
+      await consumeChatStream(res, {
+        pid: en.pid,
+        convId: en.convId,
+        path: en.path,
+        question: en.question,
+        thumbs: en.images || [],
+        imageUrls: en.imageUrls || null,
+        draftKey: en.draftKey || '',
+        modelAtSend: en.modelAtSend || '',
+        speedAtSend: en.speedAtSend || '',
+        controller,
+      });
+    },
+    [consumeChatStream],
+  );
+
+  // 挂载时恢复：localStorage 里的 inflight 回合逐条重挂
+  useEffect(() => {
+    const entries = readInflight();
+    if (!entries.length) return;
+    for (const en of entries) {
+      if (!storeRef.current.conversations.some((c) => c.id === en.convId)) {
+        removeInflight(en.pid);
+        continue;
+      }
+      reattachTurn(en);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---- 发送 ----
+  const send = useCallback(async (convId, path, question, quote, draftKey, images = []) => {
+    // 同一会话仍串行（一个 Devin 会话不能并发 prompt）；不同会话放行。
+    for (const v of abortsRef.current.values()) {
+      if (v.convId === convId) {
+        setNotice({ kind: 'info', text: '该对话已有进行中的回合，请先停止或等待完成' });
+        return;
+      }
+    }
+    const c = storeRef.current.conversations.find((x) => x.id === convId);
+    if (!c) return;
+    // 支线也走 work：完整 agent 能力（工具/权限/模型配置），但用支线自己的
+    // Devin 会话（branch.sessionId），与主线 session 相互隔离。
+    const kind = 'work';
+    const sessId = path.length ? branchSessionAt(c.turns, path) : c.sessionId;
+    let history;
+    try {
+      // 斜杠命令原文下发：打进 envelope 会让 Devin 认不出 /compact 等命令。
+      // 原生续聊（work + 已有 sessionId）不回放主线（Devin 侧已有），
+      // 但支线内容原生会话没有——只补支线记录；无支线时仍是空历史。
+      history = question.trimStart().startsWith('/')
+        ? []
+        : sessId
+          ? branchContextEntries(c.turns)
+          : historyForRequest(c.turns, path);
+    } catch {
+      setNotice({ kind: 'error', text: '无法定位该支线上下文' });
+      return;
+    }
+    const pid = makeId();
+    const controller = new AbortController();
+    abortsRef.current.set(pid, { controller, convId });
+    const thumbs = images.map((i) => i.thumb).filter(Boolean);
+    const imageUrls = images?.length ? await uploadAttachments(images) : null;
+    // 本轮使用的 model 选择快照：done 上报的生效值与"哪次选择"绑定，
+    // 选择变了就即时改显选中项，不变就显示真实解析值。
+    const modelAtSend =
+      typeof c.modelConfig?.model === 'string' ? c.modelConfig.model : '';
+    const speedAtSend =
+      typeof c.modelConfig?.speed === 'string' ? c.modelConfig.speed : '';
+    setPendings((ps) => [
+      ...ps,
+      {
+        id: pid,
+        convId,
+        path: [...path],
+        question,
+        text: '',
+        tools: [],
+        kind,
+        images: thumbs,
+        imageUrls,
+      },
+    ]);
+    // 提交即清空输入框与附图（内容已显示在回合气泡里）；失败时在 catch 回填。
+    if (draftKey) {
+      setDrafts((d) => ({ ...d, [draftKey]: '' }));
+      setImgs((d) => ({ ...d, [draftKey]: [] }));
+    }
+    // inflight 落盘：刷新页面后可按 convId 重挂服务端回合
+    addInflight({
+      pid,
+      convId,
+      path: [...path],
+      question,
+      images: thumbs,
+      imageUrls,
+      draftKey: draftKey || '',
+      modelAtSend,
+      speedAtSend,
+      startedAt: Date.now(),
+    });
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          buildChatBody({
+            conv: c,
+            kind,
+            history,
+            question,
+            quote,
+            images,
+            sessionId: sessId,
+          }),
+        ),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        let msg = `服务返回 ${res.status}`;
+        try {
+          const j = await res.json();
+          if (j?.error) msg = j.error;
+        } catch {}
+        throw new Error(msg);
+      }
+      await consumeChatStream(res, {
+        pid,
+        convId,
+        path,
+        question,
+        thumbs,
+        imageUrls,
+        draftKey,
+        modelAtSend,
+        speedAtSend,
+        controller,
+        restoreImages: images,
+      });
+    } catch (e) {
+      // 仅覆盖发出前的失败（网络错误/4xx 未开流）；流内错误 consume 内部已收尾
+      setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
+      setPendings((ps) => ps.filter((p) => p.id !== pid));
+      setPerms((ps) => ps.filter((x) => x.pid !== pid));
+      if (draftKey) {
+        setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
+        setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
+      }
+      abortsRef.current.delete(pid);
+      removeInflight(pid);
+    }
+  }, [consumeChatStream]);
+
+  const onStop = useCallback((pid) => {
+    const entry = abortsRef.current.get(pid);
+    if (!entry) return;
+    // 通知服务端真正中止回合（kill acp 进程）→ 回合广播 stopped 收尾；
+    // 本地 abort 兜底：服务端不可达时至少断开本地流。
+    fetch('/api/chat/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ convId: entry.convId }),
+    }).catch(() => {});
+    entry.controller.abort();
+  }, []);
 
   const decidePerm = useCallback(async (requestId, optionId) => {
     setPerms((ps) => ps.filter((p) => p.requestId !== requestId));

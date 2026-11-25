@@ -10,6 +10,7 @@
 // 只沿「当前线程 turns 里包含该 branch 的回合」向下走。
 
 export const STORAGE_KEY = 'newqa:v1';
+export const INFLIGHT_KEY = 'newqa:inflight';
 export const THEME_KEY = 'newqa:theme';
 export const LAYOUT_KEY = 'newqa:layout';
 export const QUOTE_LIMIT = 16 * 1024;

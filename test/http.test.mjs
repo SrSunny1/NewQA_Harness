@@ -196,6 +196,109 @@ test('并发第二单 → 409', async () => {
   );
 });
 
+// 可控节奏的假 agent：prompt 先吐「前半」，响应由测试经 release 触发
+function controlledSpawn(releaseRef) {
+  return fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, { sessionId: 's1' });
+    } else if (msg.method === 'session/prompt') {
+      api.notify('session/update', {
+        sessionId: 's1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '前半' } },
+      });
+      releaseRef.current = () => {
+        api.notify('session/update', {
+          sessionId: 's1',
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '后半' } },
+        });
+        api.respond(msg.id, { stopReason: 'end_turn' });
+      };
+    }
+  });
+}
+
+test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () => {
+  const releaseRef = { current: null };
+  await withServer(
+    async (base) => {
+      const c1 = new AbortController();
+      const res1 = await fetch(`${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...VALID, convId: 'cv1' }),
+        signal: c1.signal,
+      });
+      assert.equal(res1.status, 200);
+      await new Promise((r) => setTimeout(r, 80)); // 让「前半」进缓冲
+      c1.abort(); // 模拟刷新断连——不应杀回合
+      res1.body?.cancel().catch(() => {});
+      await new Promise((r) => setTimeout(r, 40));
+      // attach：回合应仍在跑，先重放「前半」
+      const res2 = await postJson(`${base}/api/chat/attach`, { convId: 'cv1' });
+      assert.equal(res2.status, 200);
+      await new Promise((r) => setTimeout(r, 40));
+      releaseRef.current?.(); // 后半 + 完成，应经 live 流到达
+      const text = await res2.text();
+      assert.match(text, /前半/);
+      assert.match(text, /后半/);
+      assert.match(text, /"type":"done"/);
+      assert.doesNotMatch(text, /"type":"error"/);
+    },
+    { spawnImpl: controlledSpawn(releaseRef) },
+  );
+});
+
+test('attach 已完结回合：重放终态事件后流结束；未知 convId → 404', async () => {
+  await withServer(async (base) => {
+    const res1 = await post(base, { ...VALID, convId: 'cv2' });
+    assert.equal((await res1.text()).includes('"type":"done"'), true);
+    // 回合已 done 但回放缓冲仍在 TTL 内：attach 重放后 end
+    const res2 = await postJson(`${base}/api/chat/attach`, { convId: 'cv2' });
+    assert.equal(res2.status, 200);
+    const text = await res2.text();
+    assert.match(text, /"type":"done"/);
+    // 未知 convId
+    assert.equal((await postJson(`${base}/api/chat/attach`, { convId: 'nope' })).status, 404);
+    assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'nope' })).status, 404);
+    // 非法输入
+    assert.equal((await postJson(`${base}/api/chat/attach`, {})).status, 400);
+    assert.equal(
+      (
+        await fetch(`${base}/api/chat/attach`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: '{}',
+        })
+      ).status,
+      415,
+    );
+  });
+});
+
+test('stop 端点中止回合 → 广播 stopped 收尾；重复 stop → 404', async () => {
+  // 假 agent 永不响应 prompt
+  const hanging = fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    else if (msg.method === 'session/new') api.respond(msg.id, { sessionId: 's' });
+  });
+  await withServer(
+    async (base) => {
+      const res1 = await post(base, { ...VALID, convId: 'cv9' });
+      assert.equal(res1.status, 200);
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'cv9' })).status, 200);
+      const text = await res1.text();
+      assert.match(text, /"type":"stopped"/);
+      assert.doesNotMatch(text, /"type":"done"/);
+      // 已收尾：重复 stop → 404
+      assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'cv9' })).status, 404);
+    },
+    { spawnImpl: hanging },
+  );
+});
+
 function getRaw(base, rawPath) {
   return new Promise((resolve, reject) => {
     const req = http.request(`${base}${rawPath}`, (res) => {

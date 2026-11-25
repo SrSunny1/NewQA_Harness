@@ -98,7 +98,9 @@ const OPTIONS = {
 const enc = (s) => new TextEncoder().encode(s);
 const chatCalls = []; // { body }，/api/chat 的每次请求体
 let optionsCalls = 0;
-let chatResponder = null; // 测试可注入自定义流（如挂起模拟 pending）
+let chatResponder = null;
+let attachResponder = null; // 注入 /api/chat/attach 的流
+const attachCalls = []; // 测试可注入自定义流（如挂起模拟 pending）
 
 function ndjson(events) {
   return new Response(
@@ -154,6 +156,13 @@ globalThis.fetch = async (url, init = {}) => {
     return Response.json({ path: '/tmp', parent: null, folders: [], truncated: false });
   }
   if (u === '/api/chat/permission') return Response.json({ ok: true });
+  if (u === '/api/chat/attach') {
+    const body = JSON.parse(init.body);
+    attachCalls.push(body);
+    if (attachResponder) return attachResponder(body);
+    return Response.json({ error: '该对话没有进行中或可回放的回合' }, { status: 404 });
+  }
+  if (u === '/api/chat/stop') return Response.json({ ok: true });
   return new Response('not found', { status: 404 });
 };
 
@@ -1068,6 +1077,64 @@ test('dom：文件夹菜单「新建对话…」→ 二级页选工作区开新�
     2,
     'ws-b 组内出现两条会话',
   );
+});
+
+test('dom：刷新恢复——inflight 回合经 attach 重挂、重放完成后入库', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-re', title: '恢复测试', turns: [], workspace: '/tmp/ws-a', sessionId: null },
+      ],
+      activeId: 'cv-re',
+      workspaces: ['/tmp/ws-a'],
+      wsNames: {},
+    }),
+  );
+  // inflight 种子：模拟刷新前正在跑的回合
+  window.localStorage.setItem(
+    'newqa:inflight',
+    JSON.stringify([
+      {
+        pid: 'p-re',
+        convId: 'cv-re',
+        path: [],
+        question: '跑一个长任务',
+        images: [],
+        imageUrls: null,
+        draftKey: 'main',
+        modelAtSend: '',
+        speedAtSend: '',
+        startedAt: Date.now(),
+      },
+    ]),
+  );
+  attachCalls.length = 0;
+  attachResponder = () =>
+    ndjson([
+      { type: 'delta', text: '恢复的回答' },
+      { type: 'done', sessionId: 'sess-re' },
+    ]);
+  await mountApp();
+  await act(async () => {
+    await tick(50);
+  });
+  assert.equal(attachCalls.length, 1, '挂载后对进行中的回合发起 attach');
+  assert.equal(attachCalls[0].convId, 'cv-re');
+  const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  const conv = stored.conversations.find((c) => c.id === 'cv-re');
+  assert.equal(conv.turns.length, 1, '重放完成后回合入库');
+  assert.equal(conv.turns[0].question, '跑一个长任务');
+  assert.match(conv.turns[0].answer, /恢复的回答/);
+  assert.equal(conv.sessionId, 'sess-re', 'done 的 sessionId 写回会话');
+  assert.ok(
+    !(window.localStorage.getItem('newqa:inflight') || '').includes('p-re'),
+    'inflight 标记已清除',
+  );
+  attachResponder = null;
 });
 
 test('dom：清理', async () => {

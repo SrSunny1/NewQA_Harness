@@ -358,9 +358,52 @@ export function createServer({
   defaultCwd = DEFAULT_CWD,
   attachDir = DEFAULT_ATTACH_DIR,
 } = {}) {
-  // 按对话串行：同一 convId 只许一个在跑回合；不同对话/工作区可并行。
+  // 进行中的回合注册表：回合生命周期与单个 HTTP 连接解耦——浏览器刷新/
+  // 断线只摘掉该连接的 listener，回合在服务端继续跑完；事件进回放缓冲
+  // （连续 delta 合并），/api/chat/attach 可重放缓冲并追 live 流。
   // 不带 convId 的请求共用 '' 键，保持旧的全局串行语义。
-  const busyConvs = new Set();
+  const activeTurns = new Map(); // convId → rec
+  const TURN_REPLAY_TTL = 30 * 60 * 1000; // 完成后回放缓冲保留时长
+
+  // 事件进缓冲并广播：连续 delta 合并成一条，控制回放体积。
+  const broadcast = (rec, ev) => {
+    const last = rec.events[rec.events.length - 1];
+    if (ev.type === 'delta' && last?.type === 'delta') last.text += ev.text;
+    else rec.events.push(ev);
+    const line = JSON.stringify(ev) + '\n';
+    for (const r of rec.listeners) {
+      try {
+        r.write(line);
+      } catch {}
+    }
+  };
+  // 把响应挂上回合：先同步重放缓冲（running 时再加 listener——同 tick 无竞态），
+  // 已完结的回合重放完直接 end；连接断开只摘 listener，不影响回合本身。
+  const attachRes = (rec, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Accel-Buffering': 'no',
+    });
+    // 立即发头：agent 可能长时间无输出，客户端应先拿到 200 再等流
+    res.flushHeaders();
+    for (const ev of rec.events) {
+      // 已解决（或回合已结束）的权限请求不重放——否则刷新后
+      // 客户端会复活一个永远无法作答的权限弹窗
+      if (ev.type === 'permission' && !pendingPerms.has(ev.requestId)) continue;
+      try {
+        res.write(JSON.stringify(ev) + '\n');
+      } catch {}
+    }
+    if (rec.state !== 'running') {
+      try {
+        res.end();
+      } catch {}
+      return;
+    }
+    rec.listeners.add(res);
+    res.on('close', () => rec.listeners.delete(res));
+  };
   // /api/devin/options 探测结果缓存（仅成功才写入；失败不污染，下次重试）。
   // 按模型分键：不同模型的可选项（思考档位/速度）不同；inflight 分键去重。
   const optionsCaches = new Map(); // model('' = 基础) → { at, data }
@@ -385,34 +428,29 @@ export function createServer({
     if (v.error) return json(res, 400, { error: v.error });
     const ws = await resolveWorkspace(v.workspace);
     if (ws.error) return json(res, 400, { error: ws.error });
-    if (busyConvs.has(v.convId)) {
+    if (activeTurns.get(v.convId)?.state === 'running') {
       return json(res, 409, { error: '该对话已有进行中的提问，请先停止或等待完成' });
     }
-    busyConvs.add(v.convId);
-    const controller = new AbortController();
-    const onClose = () => {
-      if (!res.writableEnded) controller.abort();
+    const rec = {
+      convId: v.convId,
+      events: [],
+      listeners: new Set(),
+      state: 'running',
+      controller: new AbortController(),
+      myPerms: new Set(),
+      stopped: false,
+      startedAt: Date.now(),
     };
-    res.on('close', onClose);
-    res.writeHead(200, {
-      'Content-Type': 'application/x-ndjson; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'X-Accel-Buffering': 'no',
-    });
-    const send = (ev) => {
-      try {
-        res.write(JSON.stringify(ev) + '\n');
-      } catch {}
-    };
+    activeTurns.set(v.convId, rec);
+    attachRes(rec, res);
     // 本回合发出的权限请求 id：回合结束只清自己这批，并发回合互不清除。
-    const myPerms = new Set();
     const onPermission =
       v.kind === 'work'
         ? (info) => {
-            send({ type: 'permission', ...info });
+            broadcast(rec, { type: 'permission', ...info });
             return new Promise((resolve) => {
               pendingPerms.set(info.requestId, { resolve, options: info.options });
-              myPerms.add(info.requestId);
+              rec.myPerms.add(info.requestId);
             });
           }
         : null;
@@ -427,19 +465,19 @@ export function createServer({
         modelConfig: v.kind === 'work' ? v.modelConfig : null,
         images: v.images,
         cwd: ws.cwd,
-        signal: controller.signal,
+        signal: rec.controller.signal,
         spawnImpl,
-        onDelta: (text) => send({ type: 'delta', text }),
-        onTool: v.kind === 'work' ? (tool) => send({ type: 'tool', tool }) : null,
+        onDelta: (text) => broadcast(rec, { type: 'delta', text }),
+        onTool: v.kind === 'work' ? (tool) => broadcast(rec, { type: 'tool', tool }) : null,
         onPermission,
       });
       if (v.kind === 'work') {
         // 只读证据：work 回合成功后的 git 快照（有超时上限，不阻塞回合）。
         try {
           const snapshot = await gitSnapshot(ws.cwd);
-          send({ type: 'git', snapshot });
+          broadcast(rec, { type: 'git', snapshot });
         } catch {
-          send({
+          broadcast(rec, {
             type: 'git',
             snapshot: {
               available: false,
@@ -453,29 +491,87 @@ export function createServer({
         }
       }
       // done 透传本轮实际生效模型（discussion/未知时缺省）
-      send({
+      broadcast(rec, {
         type: 'done',
         sessionId: result.sessionId,
         ...(result.model ? { model: result.model } : {}),
       });
     } catch (e) {
-      if (e.name !== 'AbortError' && !controller.signal.aborted && !res.writableEnded) {
-        send({
+      if (rec.stopped) {
+        // 用户经 /api/chat/stop 主动停止：语义与错误分开（客户端不存不完整回合）
+        broadcast(rec, { type: 'stopped' });
+      } else {
+        broadcast(rec, {
           type: 'error',
           message: e instanceof AcpError ? e.message : '服务内部错误，请重试',
         });
       }
     } finally {
-      for (const id of myPerms) {
+      for (const id of rec.myPerms) {
         pendingPerms.get(id)?.resolve(null);
         pendingPerms.delete(id);
       }
-      res.off('close', onClose);
-      try {
-        res.end();
-      } catch {}
-      busyConvs.delete(v.convId);
+      rec.state = rec.stopped ? 'stopped' : rec.events.some((ev) => ev.type === 'done') ? 'done' : 'error';
+      for (const r of rec.listeners) {
+        try {
+          r.end();
+        } catch {}
+      }
+      rec.listeners.clear();
+      // 回放缓冲保留一段时间供刷新后重放；新回合覆盖注册表时不误删
+      const t = setTimeout(() => {
+        if (activeTurns.get(v.convId) === rec) activeTurns.delete(v.convId);
+      }, TURN_REPLAY_TTL);
+      t.unref?.();
     }
+  }
+
+  // 重新挂流：刷新/断线后重放回合缓冲并追 live（已完结则重放完即 end）。
+  async function handleChatAttach(req, res) {
+    if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (!ct.startsWith('application/json')) {
+      return json(res, 415, { error: '仅接受 JSON 请求体' });
+    }
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return json(res, e.statusCode || 400, { error: e.message || '请求体无效' });
+    }
+    const convId = body?.convId;
+    if (typeof convId !== 'string' || !convId || convId.length > 128) {
+      return json(res, 400, { error: 'convId 缺失或格式不正确' });
+    }
+    const rec = activeTurns.get(convId);
+    if (!rec) return json(res, 404, { error: '该对话没有进行中或可回放的回合' });
+    attachRes(rec, res);
+  }
+
+  // 主动停止：abort 该回合的 acp 进程；回合收尾时广播 stopped 事件。
+  async function handleChatStop(req, res) {
+    if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (!ct.startsWith('application/json')) {
+      return json(res, 415, { error: '仅接受 JSON 请求体' });
+    }
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return json(res, e.statusCode || 400, { error: e.message || '请求体无效' });
+    }
+    const convId = body?.convId;
+    if (typeof convId !== 'string' || !convId || convId.length > 128) {
+      return json(res, 400, { error: 'convId 缺失或格式不正确' });
+    }
+    const rec = activeTurns.get(convId);
+    if (!rec || rec.state !== 'running') {
+      return json(res, 404, { error: '该对话没有进行中的回合' });
+    }
+    rec.stopped = true;
+    rec.controller.abort();
+    return json(res, 200, { ok: true });
   }
 
   async function handlePermissionDecision(req, res) {
@@ -663,7 +759,7 @@ export function createServer({
     }
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
       const pathname = url.pathname;
@@ -671,6 +767,8 @@ export function createServer({
         return json(res, 403, { error: '拒绝来自非本机的请求' });
       }
       if (pathname === '/api/chat') return await handleChat(req, res);
+      if (pathname === '/api/chat/attach') return await handleChatAttach(req, res);
+      if (pathname === '/api/chat/stop') return await handleChatStop(req, res);
       if (pathname === '/api/chat/permission') return await handlePermissionDecision(req, res);
       if (pathname === '/api/workspace/inspect') return await handleInspect(req, res);
       if (pathname === '/api/workspace/browse') return await handleBrowse(req, res);
@@ -724,6 +822,18 @@ export function createServer({
       }
     }
   });
+  // 服务关闭时中止所有活跃回合：不留孤儿 devin 子进程
+  server.on('close', () => {
+    for (const rec of activeTurns.values()) {
+      if (rec.state === 'running') {
+        rec.stopped = true;
+        try {
+          rec.controller.abort();
+        } catch {}
+      }
+    }
+  });
+  return server;
 }
 
 const isMain =
