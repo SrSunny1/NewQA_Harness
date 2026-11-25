@@ -1751,6 +1751,7 @@ function Sidebar(props) {
     onRename,
     onDeleteRequest,
     onBrowseWs,
+    onBrowseWsInFolder,
     busyConvIds,
     onToggleGroup,
     onRenameWs,
@@ -2217,6 +2218,16 @@ function Sidebar(props) {
                     </>
                   ) : (
                     <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          closeMenu();
+                          onBrowseWsInFolder?.(f.id);
+                        }}
+                      >
+                        新建工作区…
+                      </button>
                       <button
                         type="button"
                         role="menuitem"
@@ -3916,6 +3927,16 @@ export default function App() {
               onDeleteRequest={setDelConv}
               onBrowseWs={() =>
                 setPicker({ initial: '', onPick: pickWorkspace })
+              }
+              onBrowseWsInFolder={(fid) =>
+                // 文件夹内「新建工作区…」：选完目录先注册/开会话，再归入该文件夹
+                setPicker({
+                  initial: '',
+                  onPick: (canonical) => {
+                    pickWorkspace(canonical);
+                    moveWsToFolder(canonical, fid);
+                  },
+                })
               }
               busyConvIds={pendings.map((p) => p.convId)}
               onToggleGroup={toggleWsGroup}

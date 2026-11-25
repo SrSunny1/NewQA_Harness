@@ -989,6 +989,51 @@ test('dom：工作区文件夹——新建/重命名/菜单移入/删除回落�
   );
 });
 
+test('dom：文件夹菜单「新建工作区…」→ 选目录后直接归入该文件夹', async () => {
+  // 上个用例结束态：顶层文件夹「子集」，ws-b 在其内，ws-a 在顶层
+  const folderSection = container.querySelector('.ws-groups > .ws-folder');
+  assert.ok(folderSection, '顶层仍有文件夹');
+  const beforeStored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  const folderId = beforeStored.wsFolders[0].id;
+  await click(folderSection.querySelector('.conv-menu-btn'));
+  const newWsItem = [...container.querySelectorAll('.conv-menu button')].find(
+    (b) => b.textContent.trim() === '新建工作区…',
+  );
+  assert.ok(newWsItem, '文件夹菜单含「新建工作区…」');
+  await click(newWsItem);
+  await act(async () => {
+    await tick(30);
+  });
+  // 目录选择器打开（mock browse → /tmp），直接确认当前目录
+  const dialog = container.querySelector('[role="dialog"]');
+  assert.ok(dialog, '目录选择器打开');
+  const confirm = [...container.querySelectorAll('button')].find(
+    (b) => b.textContent.trim() === '选择此文件夹',
+  );
+  await click(confirm);
+  await act(async () => {
+    await tick(30);
+  });
+  // mock inspect 回 /tmp/x：注册 + 归入该文件夹 + 顺手开了新会话
+  const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(stored.wsFolderId['/tmp/x'], folderId, '新工作区直接归入文件夹');
+  assert.ok(stored.workspaces.includes('/tmp/x'), '工作区已注册');
+  assert.ok(
+    stored.conversations.some((c) => c.workspace === '/tmp/x'),
+    '新工作区下自动开了会话',
+  );
+  assert.ok(!container.querySelector('[role="dialog"]'), '选择器已关闭');
+  // 渲染验证：/tmp/x 出现在文件夹 body 内，不在顶层
+  assert.ok(
+    container.querySelector('.ws-folder-body .ws-group[data-ws="/tmp/x"]'),
+    '新工作区渲染在文件夹内',
+  );
+  assert.ok(
+    !container.querySelector('.ws-groups > .ws-group[data-ws="/tmp/x"]'),
+    '新工作区不出现在顶层',
+  );
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);
