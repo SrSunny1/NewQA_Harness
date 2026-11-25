@@ -27,14 +27,15 @@ export const DEFAULT_MODEL_CONFIG = Object.freeze({
 const MODEL_CONFIG_VALUE_LIMIT = 128;
 // 实际生效模型值（conv.effectiveModel / turn.model）的存档上限
 const EFFECTIVE_MODEL_LIMIT = 128;
-// 免费档只有 SWE-2 / SWE-2 Flash 的 medium/high/max 精确 SKU。
-// 不能按「包含 swe-2」判断：Fusion 的 UID 里也有 sidekick-swe-2（副模型
-// 免费、主模型计费），swe-2-*-lightning 也是收费变体；未知值按计费处理。
-const FREE_MODEL = /^swe-2(?:-flash)?-(?:medium|high|max)$/i;
+// 免费档只有 SWE-2 家族（swe-2 / swe-2.1，含各自 flash）的 medium/high/max
+// 精确 SKU。不能按「包含 swe-2」判断：Fusion 的 UID 里也有 sidekick-swe-2
+// （副模型免费、主模型计费），swe-2-*-lightning 也是收费变体；未知值按计费处理。
+const FREE_MODEL = /^swe-2(?:-1)?(?:-flash)?-(?:medium|high|max)$/i;
 export const isBillableModel = (value) => !FREE_MODEL.test(String(value || ''));
-// 速度 Fast 会把模型解析成收费的快速变体（SWE-2 → swe-2-*-lightning，
-// Claude/GPT → *-fast / *-priority）；'' = 跟随全局默认，由调用方解析。
-export const isBillableSpeed = (speed) => speed === 'fast';
+// 非 standard 速度档会把模型解析成收费快速变体（SWE-2 → *-lightning，
+// Claude/GPT → *-fast / *-priority）；'' = 跟随全局默认由调用方解析。
+// fail closed：fast/ultrafast/未来新档一律按计费标黄。
+export const isBillableSpeed = (speed) => !!speed && speed !== 'standard';
 
 // 存档里的 modelConfig → 固定三键；非对象/缺省回默认，未知值保留字符串。
 export function asModelConfig(raw) {

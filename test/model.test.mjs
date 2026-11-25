@@ -755,9 +755,12 @@ test('parseStored：conv.effectiveModel ≤128 与 turn.model 兼容消毒', () 
   assert.ok(!('model' in bareTurn), '非法值不保留字段');
 });
 
-test('isBillableSpeed：Fast 计费，Standard/缺省不计费', () => {
-  assert.equal(isBillableSpeed('fast'), true);
-  for (const value of ['standard', '', null, undefined, 'max']) {
+test('isBillableSpeed：非 Standard 速度档计费，Standard/缺省不计费', () => {
+  // fast（旧档名）/ultrafast（新档名）/未知新档一律按计费处理（fail closed）
+  for (const value of ['fast', 'ultrafast', 'turbo']) {
+    assert.equal(isBillableSpeed(value), true, value);
+  }
+  for (const value of ['standard', '', null, undefined]) {
     assert.equal(isBillableSpeed(value), false, String(value));
   }
 });
@@ -785,6 +788,11 @@ test('isBillableModel：仅免费档 SWE-2 精确 SKU 不计费', () => {
     'swe-2-flash-medium',
     'swe-2-flash-high',
     'swe-2-flash-max',
+    // SWE-2.1 家族同为免费档
+    'swe-2-1-medium',
+    'swe-2-1-high',
+    'swe-2-1-max',
+    'swe-2-1-flash-medium',
   ]) {
     assert.equal(isBillableModel(value), false, value);
   }
@@ -793,6 +801,10 @@ test('isBillableModel：仅免费档 SWE-2 精确 SKU 不计费', () => {
     'swe-2-medium-lightning',
     'swe-2-max-lightning',
     'swe-2-flash-medium-lightning',
+    'swe-2-1-medium-lightning',
+    // 未知/新家族不带精确档位 → 按计费标黄（保守）
+    'swe-2-1',
+    'swe-3-medium',
     // Fusion 的 UID 里也含 sidekick-swe-2，但主模型计费
     'fusion-gpt-6-2-sol-medium-sidekick-swe-2-high',
     'fusion-claude-opus-5-5-medium-sidekick-swe-2-medium',

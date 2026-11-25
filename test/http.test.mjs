@@ -545,31 +545,38 @@ test('modelConfig 校验：非对象/未知键/非字符串/超长 → 400；合
   );
 });
 
-test('免费 SWE-2 + Fast → 400（防 Lightning 静默计费）；Standard/付费模型放行', async () => {
+test('免费 SWE-2 家族 + 非 Standard 速度档 → 400（防快速变体静默计费）', async () => {
   const free = (model, speed) =>
     validateChatBody({ ...VALID, kind: 'work', modelConfig: { model, speed } });
+  // 免费家族（swe-2 / swe-2.1 / flash / family 别名）× 新旧速度档名
   for (const model of [
     'swe-2',
     'swe-2-high',
     'swe-2-flash-medium',
     'swe-2-max',
     'swe-2-flash-max',
+    'swe-2-1',
+    'swe-2-1-medium',
+    'swe-2-1-flash-max',
   ]) {
-    const r = free(model, 'fast');
-    assert.match(r.error, /Fast.*Lightning/, model);
+    for (const speed of ['fast', 'ultrafast', 'turbo']) {
+      const r = free(model, speed);
+      assert.match(r.error, /快速变体|Standard/, `${model} + ${speed}`);
+    }
   }
   assert.ok(!free('swe-2-high', 'standard').error, 'Standard 放行');
+  assert.ok(!free('swe-2-1-medium', 'standard').error, 'SWE-2.1 Standard 放行');
   assert.ok(!free('swe-2-high', '').error, '缺省速度放行');
   assert.ok(
-    !free('claude-opus-5-5-medium', 'fast').error,
-    '付费模型 + Fast 本来就有意加速，放行',
+    !free('claude-opus-5-5-medium', 'ultrafast').error,
+    '付费模型 + Ultrafast 本来就有意加速，放行',
   );
   // HTTP 层：请求在 spawn 前被拒
   await withServer(async (base) => {
     const res = await post(base, {
       ...VALID,
       kind: 'work',
-      modelConfig: { model: 'swe-2-flash-medium', speed: 'fast' },
+      modelConfig: { model: 'swe-2-1-medium', speed: 'ultrafast' },
     });
     assert.equal(res.status, 400);
     assert.match((await res.json()).error, /Standard/);

@@ -1166,10 +1166,16 @@ function EffectiveModelTag({ value, opts, speed = '' }) {
       : [];
   const name = options.find((o) => o.value === value)?.name || value;
   const fast = isBillableSpeed(speed);
+  const speedName =
+    (opts.status === 'ok'
+      ? opts.config?.speed?.options?.find((o) => o.value === speed)?.name
+      : '') || speed;
   const billable = isBillableModel(value) || fast;
   const reasons = [
     isBillableModel(value) ? '此模型不在免费档（计费）' : '',
-    fast ? '速度 Fast 会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度' : '',
+    fast
+      ? '非 Standard 速度档会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度'
+      : '',
   ].filter(Boolean);
   return (
     <span
@@ -1177,7 +1183,7 @@ function EffectiveModelTag({ value, opts, speed = '' }) {
       title={billable ? reasons.join('；') : undefined}
     >
       实际：{name}
-      {fast ? '（Fast 计费）' : ''}
+      {fast ? `（${speedName} 计费）` : ''}
     </span>
   );
 }
@@ -1245,7 +1251,7 @@ function ModelBar({ conv, opts, busy, onSelect }) {
               {shown.map((o) => (
                 <option key={o.value} value={o.value} title={o.value}>
                   {o.name || o.value}
-                  {key === 'speed' && o.value === 'fast' ? '（计费）' : ''}
+                  {key === 'speed' && isBillableSpeed(o.value) ? '（计费）' : ''}
                 </option>
               ))}
               {!!cur && !shown.some((o) => o.value === cur) && (
@@ -1257,9 +1263,10 @@ function ModelBar({ conv, opts, busy, onSelect }) {
             {key === 'speed' && fastSpeed && (
               <small
                 className="model-warn"
-                title="速度 Fast 会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度；改成 Standard 即可免费"
+                title="非 Standard 速度档会解析为收费快速变体（SWE-2 → Lightning），会消耗周额度；改成 Standard 即可免费"
               >
-                Fast 计费
+                {options.find((o) => o.value === speedValue)?.name || speedValue}{' '}
+                计费
               </small>
             )}
             {loading && <small className="model-dft">加载中…</small>}

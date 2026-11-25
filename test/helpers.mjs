@@ -209,7 +209,7 @@ export function probeScript({
       currentValue: 'standard',
       options: [
         { value: 'standard', name: 'Standard' },
-        { value: 'fast', name: 'Fast' },
+        { value: 'ultrafast', name: 'Ultrafast' },
       ],
     },
   ],

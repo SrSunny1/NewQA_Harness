@@ -89,7 +89,7 @@ const OPTIONS = {
       currentValue: 'standard',
       options: [
         { value: 'standard', name: 'Standard' },
-        { value: 'fast', name: 'Fast' },
+        { value: 'ultrafast', name: 'Ultrafast' },
       ],
     },
   },
@@ -338,13 +338,13 @@ test('dom：模型三下拉展示探测选项与 Devin 默认，选择即持久�
   const row = container.querySelector('.model-row');
   assert.match(row.textContent, /默认（Adaptive）/);
   await select(t, 'low');
-  await select(s, 'fast');
+  await select(s, 'ultrafast');
   await select(m, 'opus');
   const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
   const conv = stored.conversations.find((c) => c.id === stored.activeId);
   assert.deepEqual(
     conv.modelConfig,
-    { model: 'opus', thought_level: 'low', speed: 'fast' },
+    { model: 'opus', thought_level: 'low', speed: 'ultrafast' },
     '选择写入会话持久化',
   );
   // fusion-* 配对不进模型下拉（由 /fusion 选择器负责）
@@ -374,7 +374,7 @@ test('dom：换模型后按 ?model= 探测，思考档显示该模型真实可�
     ['low', 'high', 'max', 'xhigh'],
     '思考档随所选模型刷新，不支持值以兜底项保留',
   );
-  // 还原为上个用例留下的 {opus, low, fast}，避免污染后续用例
+  // 还原为上个用例留下的 {opus, low, ultrafast}，避免污染后续用例
   await select(t, 'low');
   await select(m, 'opus');
 });
@@ -433,7 +433,7 @@ test('dom：work 回合 POST body 携带 modelConfig', async () => {
   assert.deepEqual(body.modelConfig, {
     model: 'opus',
     thought_level: 'low',
-    speed: 'fast',
+    speed: 'ultrafast',
   });
   await act(async () => {
     await tick(10);
@@ -545,7 +545,7 @@ test('dom：重挂载（模拟刷新）后模型选择仍在', async () => {
   assert.equal(sels.length, 3);
   assert.deepEqual(
     sels.map((s) => s.value),
-    ['opus', 'low', 'fast'],
+    ['opus', 'low', 'ultrafast'],
     '刷新后选择恢复（parseStored 回读）',
   );
 });
@@ -730,18 +730,18 @@ test('dom：SWE-2 模型不标黄；无 model 上报时实际行隐藏', async (
   }
 });
 
-test('dom：速度 Fast 标「计费」，SWE-2 实际模型行也标黄', async () => {
-  // 前面的测试已把速度选成 fast；这里把模型切到免费的 SWE-2 家族
+test('dom：速度 Ultrafast 标「计费」，SWE-2 实际模型行也标黄', async () => {
+  // 前面的测试已把速度选成 ultrafast；这里把模型切到免费的 SWE-2 家族
   const [m, , s] = container.querySelectorAll('.model-select');
   await select(m, 'swe-2-high');
-  await select(s, 'fast');
+  await select(s, 'ultrafast');
   const row = container.querySelector('.model-row');
-  assert.ok(row.querySelector('.model-warn'), '速度 Fast 有常驻计费提示');
-  assert.match(row.textContent, /Fast 计费/);
-  const fastOpt = [...s.options].find((o) => o.value === 'fast');
-  assert.match(fastOpt.textContent, /Fast（计费）/, 'Fast 选项标签标明计费');
+  assert.ok(row.querySelector('.model-warn'), '非 Standard 速度档有常驻计费提示');
+  assert.match(row.textContent, /Ultrafast 计费/);
+  const fastOpt = [...s.options].find((o) => o.value === 'ultrafast');
+  assert.match(fastOpt.textContent, /Ultrafast（计费）/, '速度选项标签标明计费');
 
-  // done 只上报家族值 swe-2-high；提示必须结合 speed=fast 标黄
+  // done 只上报家族值 swe-2-high；提示必须结合 speed=ultrafast 标黄
   chatResponder = () =>
     ndjson([
       { type: 'delta', text: '答：fast' },
@@ -756,13 +756,13 @@ test('dom：速度 Fast 标「计费」，SWE-2 实际模型行也标黄', async
     });
     const eff = container.querySelector('.model-eff');
     assert.ok(eff, '实际模型行渲染');
-    assert.match(eff.textContent, /实际：SWE-2（Fast 计费）/);
-    assert.ok(eff.classList.contains('warn'), 'Fast → warn 标黄');
+    assert.match(eff.textContent, /实际：SWE-2（Ultrafast 计费）/);
+    assert.ok(eff.classList.contains('warn'), 'ultrafast → warn 标黄');
     assert.match(eff.getAttribute('title'), /Lightning/);
     // effSpeed 与 effFor 一起持久化
     const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
     const conv = stored.conversations.find((c) => c.id === stored.activeId);
-    assert.equal(conv.effSpeed, 'fast');
+    assert.equal(conv.effSpeed, 'ultrafast');
   } finally {
     chatResponder = null;
   }
