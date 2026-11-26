@@ -21,6 +21,10 @@
   --danger: #b91c1c;
   --warn-bg: rgba(217, 119, 6, 0.1);
   --warn-ink: #92400e;
+  --sum-grad-a: #2563eb;
+  --sum-grad-b: #7c3aed;
+  --sum-warn-a: #b45309;
+  --sum-warn-b: #dc2626;
 }
 :root[data-theme='dark'] {
   --bg: #161616;
@@ -37,6 +41,10 @@
   --danger: #f87171;
   --warn-bg: rgba(217, 119, 6, 0.18);
   --warn-ink: #fbbf24;
+  --sum-grad-a: #60a5fa;
+  --sum-grad-b: #a78bfa;
+  --sum-warn-a: #fbbf24;
+  --sum-warn-b: #f87171;
 }
 
 /* 标注色（深浅主题通用，半透明） */
@@ -1837,6 +1845,20 @@ body {
   gap: 8px;
   min-width: 0;
 }
+.fp-newdir {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.fp-mkdir {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+.fp-mkdir .ws-input {
+  flex: 1;
+  min-width: 0;
+}
 .fp-cur {
   flex: 1;
   font-size: 12px;
@@ -2447,14 +2469,18 @@ body {
 .settings-summary {
   margin-left: auto;
   font-size: 11px;
-  color: var(--ink-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 65%;
+  font-weight: 600;
+  background-image: linear-gradient(92deg, var(--sum-grad-a), var(--sum-grad-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .settings-summary.warn {
-  color: var(--warn-ink);
+  background-image: linear-gradient(92deg, var(--sum-warn-a), var(--sum-warn-b));
 }
 
 /* ---------- 代码块复制按钮（零文本节点，不干扰选区偏移） ---------- */

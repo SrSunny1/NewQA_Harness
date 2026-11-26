@@ -1290,6 +1290,9 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
   const [sel, setSel] = useState(''); // 单击选中的子目录路径（空=未选中）
+  const [mkOpen, setMkOpen] = useState(false); // 新建文件夹输入行
+  const [mkName, setMkName] = useState('');
+  const [mkBusy, setMkBusy] = useState(false);
   const seqRef = useRef(0);
   const abortRef = useRef(null);
   const inputRef = useRef(null);
@@ -1329,6 +1332,36 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
     inputRef.current?.focus();
     return () => abortRef.current?.abort();
   }, [browse, initial]);
+
+  // 在当前目录下新建文件夹（等效本机 mkdir），完成后直接进入它
+  const createFolder = async () => {
+    const name = mkName.trim();
+    if (!cur || !name || mkBusy) return;
+    if (/[/\\]/.test(name)) {
+      setErr('文件夹名不能包含路径分隔符');
+      return;
+    }
+    setMkBusy(true);
+    setErr('');
+    try {
+      const r = await fetch('/api/workspace/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: cur.path === '/' ? `/${name}` : `${cur.path}/${name}`,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || `创建失败（服务返回 ${r.status}）`);
+      setMkOpen(false);
+      setMkName('');
+      browse(j.path);
+    } catch (e) {
+      setErr(e.message || '创建失败');
+    } finally {
+      setMkBusy(false);
+    }
+  };
 
   const pick = async () => {
     if (!cur || picking || busy) return;
@@ -1406,7 +1439,47 @@ function FolderPicker({ initial, defaultCwd, onPick, onClose }) {
           <span className="fp-cur" title={cur?.path || ''}>
             {busy ? '读取中…' : cur?.path || '—'}
           </span>
+          <button
+            type="button"
+            className="mini-btn fp-newdir"
+            disabled={!cur || busy}
+            aria-expanded={mkOpen}
+            onClick={() => {
+              setMkOpen((v) => !v);
+              setMkName('');
+              setErr('');
+            }}
+          >
+            新建文件夹
+          </button>
         </div>
+        {mkOpen && (
+          <div className="fp-mkdir">
+            <input
+              className="ws-input"
+              aria-label="新文件夹名称"
+              placeholder="新文件夹名称"
+              value={mkName}
+              autoFocus
+              onChange={(e) => setMkName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') createFolder();
+                if (e.key === 'Escape') {
+                  e.stopPropagation();
+                  setMkOpen(false);
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="mini-btn"
+              disabled={mkBusy || !mkName.trim()}
+              onClick={createFolder}
+            >
+              {mkBusy ? '创建中…' : '创建'}
+            </button>
+          </div>
+        )}
         <div className="fp-list" ref={listRef} role="listbox" aria-label="子目录列表">
           {cur?.folders?.length
             ? cur.folders.map((f) => (
@@ -3047,7 +3120,9 @@ export default function App() {
         delete hlRef.current[name];
       }
     }
-  });
+    // 依赖 conv 而非每次渲染：打字/流式只改 drafts/pendings，
+    // DOM 结构不变，不必重算 Range——否则每个按键都阻塞绘制
+  }, [conv, hlSupported]);
 
   // ---- 变更辅助 ----
   const mutateConv = useCallback((convId, fn) => {

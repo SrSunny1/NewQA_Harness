@@ -631,6 +631,47 @@ export function createServer({
   // 供前端文件夹选择器导航；不做任何写操作。
   const BROWSE_SCAN_CAP = 4096;
   const BROWSE_RESULT_CAP = 256;
+  // 在本机新建文件夹（目录选择器「新建文件夹」用）：仅建一级，
+  // 父目录必须存在可写；已存在 → 409。
+  async function handleMkdir(req, res) {
+    if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (!ct.startsWith('application/json')) {
+      return json(res, 415, { error: '仅接受 JSON 请求体' });
+    }
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return json(res, e.statusCode || 400, { error: e.message || '请求体无效' });
+    }
+    const raw = body?.path;
+    if (typeof raw !== 'string' || !raw.trim() || raw.length > 512) {
+      return json(res, 400, { error: 'path 缺失或格式不正确' });
+    }
+    const target = raw.trim();
+    if (!path.isAbsolute(target)) {
+      return json(res, 400, { error: 'path 必须是绝对路径' });
+    }
+    const name = path.basename(target);
+    if (!name || name === '.' || name === '..' || target !== path.join(path.dirname(target), name)) {
+      return json(res, 400, { error: '文件夹名不合法' });
+    }
+    const parent = await resolveWorkspace(path.dirname(target));
+    if (parent.error) return json(res, 400, { error: '父目录不可访问' });
+    const full = path.join(parent.canonical, name);
+    try {
+      await mkdir(full);
+    } catch (e) {
+      if (e?.code === 'EEXIST') return json(res, 409, { error: '同名文件或文件夹已存在' });
+      const denied = e && (e.code === 'EACCES' || e.code === 'EPERM' || e.code === 'EROFS');
+      return json(res, denied ? 403 : 400, {
+        error: denied ? '目录没有写入权限' : '创建文件夹失败',
+      });
+    }
+    return json(res, 200, { path: full });
+  }
+
   async function handleBrowse(req, res) {
     if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
     const ct = String(req.headers['content-type'] || '').toLowerCase();
@@ -772,6 +813,7 @@ export function createServer({
       if (pathname === '/api/chat/permission') return await handlePermissionDecision(req, res);
       if (pathname === '/api/workspace/inspect') return await handleInspect(req, res);
       if (pathname === '/api/workspace/browse') return await handleBrowse(req, res);
+      if (pathname === '/api/workspace/mkdir') return await handleMkdir(req, res);
       if (pathname === '/api/attachment' || pathname.startsWith('/api/attachment/')) {
         return pathname === '/api/attachment'
           ? await handleAttachmentUpload(req, res)

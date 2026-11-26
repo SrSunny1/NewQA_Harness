@@ -880,6 +880,34 @@ test('permissionMode 校验：ask/plan/未知值 → 400，合法值透传', asy
   });
 });
 
+test('/api/workspace/mkdir：建目录/重名 409/校验拒绝', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'newqa-mkdir-'));
+  await withServer(async (base) => {
+    // 正常创建一级目录
+    const ok = await postJson(`${base}/api/workspace/mkdir`, {
+      path: join(dir, 'proj-new'),
+    });
+    assert.equal(ok.status, 200);
+    const j = await ok.json();
+    assert.equal(j.path, join(dir, 'proj-new'));
+    const st = await import('node:fs/promises').then((m) => m.stat(j.path));
+    assert.ok(st.isDirectory(), '磁盘上真的建出来了');
+    // 重名 → 409
+    assert.equal(
+      (await postJson(`${base}/api/workspace/mkdir`, { path: join(dir, 'proj-new') })).status,
+      409,
+    );
+    // 校验：相对路径/缺失/非法段/非 JSON 方法
+    assert.equal((await postJson(`${base}/api/workspace/mkdir`, { path: 'rel/x' })).status, 400);
+    assert.equal((await postJson(`${base}/api/workspace/mkdir`, {})).status, 400);
+    assert.equal(
+      (await postJson(`${base}/api/workspace/mkdir`, { path: `${dir}/a/../b` })).status,
+      400,
+    );
+    assert.equal((await fetch(`${base}/api/workspace/mkdir`)).status, 405);
+  });
+});
+
 test('/api/attachment：上传落盘 → GET 取回原图；非法输入拒绝', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'newqa-attach-'));
   await withServer(
