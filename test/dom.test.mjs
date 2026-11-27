@@ -2026,6 +2026,207 @@ test('dom：fusion 实时指示——model 事件出配对，role 事件切高�
   chatResponder = null;
 });
 
+// ---- 内存版 fake IndexedDB：仅实现 storedb.js 用到的最小接口 ----
+// open() → req（microtask 里先 onupgradeneeded 后 onsuccess）；
+// db.transaction().objectStore().get/put 返回 req，数据存内存 Map。
+function installFakeIdb() {
+  const data = new Map();
+  const handle = {
+    failWrites: false,
+    dump: () => data, // 活 Map：测试可 seed 也可读
+  };
+  const mkReq = () => ({
+    onsuccess: null,
+    onerror: null,
+    onupgradeneeded: null,
+    result: undefined,
+    error: null,
+  });
+  const fire = (req, fn) => queueMicrotask(() => fn(req));
+  const objectStore = {
+    get(key) {
+      const req = mkReq();
+      fire(req, () => {
+        req.result = data.has(key) ? data.get(key) : undefined;
+        req.onsuccess?.();
+      });
+      return req;
+    },
+    put(value, key) {
+      const req = mkReq();
+      fire(req, () => {
+        if (handle.failWrites) {
+          req.error = new Error('injected write failure');
+          req.onerror?.();
+          return;
+        }
+        data.set(key, value);
+        req.result = key;
+        req.onsuccess?.();
+      });
+      return req;
+    },
+  };
+  const db = {
+    createObjectStore: () => objectStore,
+    transaction: () => ({ objectStore: () => objectStore }),
+  };
+  const factory = {
+    open() {
+      const req = mkReq();
+      fire(req, () => {
+        req.result = db;
+        req.onupgradeneeded?.();
+        req.onsuccess?.();
+      });
+      return req;
+    },
+  };
+  window.indexedDB = factory;
+  globalThis.indexedDB = factory;
+  return handle;
+}
+
+function uninstallFakeIdb() {
+  delete window.indexedDB;
+  delete globalThis.indexedDB;
+}
+
+const seedStoreJson = (conv) =>
+  JSON.stringify({
+    v: 1,
+    conversations: [conv],
+    activeId: conv.id,
+    workspaces: [],
+    wsNames: {},
+  });
+
+test('dom：IndexedDB 迁移——legacy localStorage 搬进 IDB 后删除 legacy key', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  const idb = installFakeIdb();
+  try {
+    const json = seedStoreJson({
+      id: 'cv-mig',
+      title: '迁移会话',
+      turns: [],
+      workspace: '',
+    });
+    window.localStorage.setItem('newqa:v1', json);
+    await mountApp();
+    await act(async () => {
+      await tick(40);
+    });
+    assert.ok(container.textContent.includes('迁移会话'), '会话渲染');
+    assert.equal(typeof idb.dump().get('newqa:v1'), 'string', 'IDB 已有存档');
+    assert.ok(
+      JSON.parse(idb.dump().get('newqa:v1')).conversations.some((c) => c.id === 'cv-mig'),
+      'IDB 内容含迁移会话',
+    );
+    assert.equal(window.localStorage.getItem('newqa:v1'), null, 'legacy key 已删除');
+  } finally {
+    uninstallFakeIdb();
+    await unmountApp();
+    window.localStorage.clear();
+  }
+});
+
+test('dom：IndexedDB 持久化——写入 IDB、清空 localStorage 重挂载仍水合', async () => {
+  const idb = installFakeIdb();
+  try {
+    window.localStorage.clear();
+    idb.dump().set(
+      'newqa:v1',
+      seedStoreJson({ id: 'cv-idb', title: 'IDB 会话', turns: [], workspace: '' }),
+    );
+    await mountApp();
+    await act(async () => {
+      await tick(40);
+    });
+    const ta = container.querySelector('#composer-main');
+    assert.ok(ta, '水合出会话后有主输入框');
+    await setText(ta, '你好');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(60);
+    });
+    assert.ok(container.textContent.includes('答：你好'), '回答上屏');
+    const stored = JSON.parse(idb.dump().get('newqa:v1'));
+    assert.ok(
+      JSON.stringify(stored).includes('答：你好'),
+      'IDB 存档含回答',
+    );
+    // 卸载 + 清空 localStorage → 重挂载仅靠 IDB 水合
+    await unmountApp();
+    window.localStorage.clear();
+    await mountApp();
+    await act(async () => {
+      await tick(40);
+    });
+    assert.ok(container.textContent.includes('答：你好'), '重挂载后回合仍渲染');
+  } finally {
+    uninstallFakeIdb();
+    await unmountApp();
+    window.localStorage.clear();
+  }
+});
+
+test('dom：IndexedDB 写入失败——出现黄色告警', async () => {
+  const idb = installFakeIdb();
+  idb.failWrites = true;
+  try {
+    window.localStorage.clear();
+    window.localStorage.setItem(
+      'newqa:v1',
+      seedStoreJson({ id: 'cv-fail', title: '失败会话', turns: [], workspace: '' }),
+    );
+    await mountApp();
+    await act(async () => {
+      await tick(40);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '触发写入');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(60);
+    });
+    const warn = container.querySelector('.notice.warn');
+    assert.ok(warn, '出现告警条');
+    assert.match(warn.textContent, /无法写入本地存储/);
+    // 写入失败时 legacy key 不得被删（数据不能丢）
+    assert.ok(window.localStorage.getItem('newqa:v1'), 'legacy key 保留');
+  } finally {
+    uninstallFakeIdb();
+    await unmountApp();
+    window.localStorage.clear();
+  }
+});
+
+test('dom：IDB 已有数据时优先于 localStorage', async () => {
+  const idb = installFakeIdb();
+  try {
+    window.localStorage.clear();
+    window.localStorage.setItem(
+      'newqa:v1',
+      seedStoreJson({ id: 'cv-legacy', title: 'Legacy 版本', turns: [], workspace: '' }),
+    );
+    idb.dump().set(
+      'newqa:v1',
+      seedStoreJson({ id: 'cv-newer', title: 'IDB 版本', turns: [], workspace: '' }),
+    );
+    await mountApp();
+    await act(async () => {
+      await tick(40);
+    });
+    assert.ok(container.textContent.includes('IDB 版本'), '渲染 IDB 版本');
+    assert.ok(!container.textContent.includes('Legacy 版本'), '不渲染 legacy 版本');
+  } finally {
+    uninstallFakeIdb();
+    await unmountApp();
+    window.localStorage.clear();
+  }
+});
+
 test('dom：清理', async () => {
   await unmountApp();
   assert.ok(true);

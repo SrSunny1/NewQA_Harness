@@ -64,6 +64,7 @@ import { WorkspaceBar, ModelBar } from './components/ModelControls.jsx';
 import { FolderPicker } from './components/FolderPicker.jsx';
 import { MarkRail, CiGroups, CiStrip, ResizeHandle } from './components/RightNav.jsx';
 import { Sidebar } from './components/Sidebar.jsx';
+import { hasStoreDb, readStoreDb, writeStoreDb } from './storedb.js';
 import './styles.css';
 
 const EXAMPLES = [
@@ -204,6 +205,10 @@ export default function App() {
   const transcriptRef = useRef(null);
   const storeRef = useRef(store);
   storeRef.current = store;
+  // 挂载瞬间的初始 store：IndexedDB 水合只在用户/应用尚未改动状态时整体替换，
+  // 永不重赋值，靠引用相等判断"状态是否还是出厂值"。
+  const initialStoreRef = useRef(store);
+  const writeSeqRef = useRef(0); // IDB 写入序号：只有最新一笔写入有权改 saveError
 
   const conv = store.conversations.find((c) => c.id === store.activeId) || null;
   // 会话级忙碌：本对话有回合在跑 → 禁用本对话控件；其它对话不受影响。
@@ -306,21 +311,79 @@ export default function App() {
     } catch {}
   }, [theme]);
 
+  // ---- IndexedDB 水合 / 迁移（仅挂载时一次） ----
+  // localStorage 配额太小，存档主存储迁到 IndexedDB；首次启动把 legacy
+  // localStorage 数据搬进 IDB，写成功后才删 legacy key 释放配额。
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (!hasStoreDb() || hydratedRef.current) return;
+    hydratedRef.current = true;
+    readStoreDb(STORAGE_KEY)
+      .then((raw) => {
+        if (typeof raw === 'string') {
+          // IDB 已有数据：优先于 localStorage。解析失败不动 IDB 记录、不水合。
+          try {
+            const parsed = parseStored(raw);
+            if (parsed) {
+              setStore((s) =>
+                s === initialStoreRef.current ? { ...parsed, loadError: null } : s,
+              );
+            }
+          } catch {}
+          return;
+        }
+        // IDB 为空：尝试迁移 legacy localStorage。只有写入成功才删 legacy key。
+        let legacy = null;
+        try {
+          legacy = localStorage.getItem(STORAGE_KEY);
+        } catch {}
+        if (!legacy) return;
+        try {
+          if (!parseStored(legacy)) return;
+        } catch {
+          return;
+        }
+        writeStoreDb(STORAGE_KEY, legacy).then((ok) => {
+          if (!ok) return;
+          try {
+            localStorage.removeItem(STORAGE_KEY);
+          } catch {}
+        });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---- 持久化 ----
   useEffect(() => {
+    const json = JSON.stringify({
+      v: 1,
+      conversations: store.conversations,
+      activeId: store.activeId,
+      workspaces: store.workspaces || [],
+      wsNames: store.wsNames || {},
+      wsFolders: store.wsFolders || [],
+      wsFolderId: store.wsFolderId || {},
+    });
+    if (hasStoreDb()) {
+      const seq = ++writeSeqRef.current;
+      writeStoreDb(STORAGE_KEY, json).then((ok) => {
+        if (seq !== writeSeqRef.current) return; // 已有更新一笔写入接管错误态
+        if (ok) {
+          setSaveError(null);
+          // 迁移清理：legacy key 还在就顺手删掉（配额释放）
+          try {
+            if (localStorage.getItem(STORAGE_KEY) !== null)
+              localStorage.removeItem(STORAGE_KEY);
+          } catch {}
+        } else {
+          setSaveError('无法写入本地存储，本次改动可能不会被保存。');
+        }
+      });
+      return;
+    }
     try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          v: 1,
-          conversations: store.conversations,
-          activeId: store.activeId,
-          workspaces: store.workspaces || [],
-          wsNames: store.wsNames || {},
-          wsFolders: store.wsFolders || [],
-          wsFolderId: store.wsFolderId || {},
-        }),
-      );
+      localStorage.setItem(STORAGE_KEY, json);
       setSaveError(null);
     } catch {
       setSaveError('无法写入本地存储，本次改动可能不会被保存。');
