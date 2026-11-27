@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "prestart": "npm run build",
     "start": "node server/index.mjs",
     "test": "node --test test/*.test.mjs",
     "dev": "vite"

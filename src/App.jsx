@@ -212,15 +212,35 @@ async function uploadAttachments(images) {
   }
 }
 
+// 只限制等待响应头的时间；拿到流后仍由调用者控制取消。
+async function fetchChatHeaders(url, { signal, ...init }, timeoutMs) {
+  const request = new AbortController();
+  const onAbort = () => request.abort(signal.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => request.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: request.signal });
+  } catch (e) {
+    signal?.removeEventListener('abort', onAbort);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // 重挂/停止某个进行中的回合：convId 必填，turnId 有则精确绑定
 // （服务端会校验回合归属）；signal 供随本地 abort 一并撤销请求。
+// attach 等首包可能耗时：只给响应头阶段加时限制，流本身不设限。
 function chatTurnRequest(action, { convId, turnId }, signal) {
-  return fetch(`/api/chat/${action}`, {
+  const url = `/api/chat/${action}`;
+  const init = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ convId, ...(turnId ? { turnId } : {}) }),
     signal,
-  });
+  };
+  return action === 'attach' ? fetchChatHeaders(url, init, 5000) : fetch(url, init);
 }
 
 // 有界停止请求：确认送达（ok）或服务端已无此回合（404）才算停干净；
@@ -4455,22 +4475,37 @@ export default function App() {
       startedAt,
     });
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...buildChatBody({
-            conv: c,
-            kind,
-            history,
-            question,
-            quote,
-            images,
-            sessionId: sessId,
+      const res = await fetchChatHeaders(
+        '/api/chat',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...buildChatBody({
+              conv: c,
+              kind,
+              history,
+              question,
+              quote,
+              images,
+              sessionId: sessId,
+            }),
+            turnId: pid,
           }),
-          turnId: pid,
-        }),
-        signal: controller.signal,
+          signal: controller.signal,
+        },
+        15000,
+      ).catch(async (error) => {
+        if (unloadingRef.current || controller.signal.aborted) throw error;
+        // POST 可能已在服务端启动，先接回同一回合，不重发提问。
+        const entry = { convId, turnId: pid };
+        const replay = await chatTurnRequest('attach', entry, controller.signal).catch(
+          () => null,
+        );
+        if (unloadingRef.current || controller.signal.aborted) throw error;
+        if (replay?.ok && replay.body) return replay;
+        if (!(await stopChatTurn(entry))) markInterrupted(pid);
+        throw new Error('连接中断，未能恢复本轮，请重试', { cause: error });
       });
       if (!res.ok || !res.body) {
         let msg = `服务返回 ${res.status}`;
@@ -4496,10 +4531,14 @@ export default function App() {
         restoreImages: images,
       });
     } catch (e) {
-      // 仅覆盖发出前的失败（网络错误/4xx 未开流）；流内错误 consume 内部已收尾。
+      // 未开流且未能恢复（或服务端明确拒绝）；流内错误在 consume 内收尾。
       // 页面卸载中的 abort 一并跳过，保住 inflight。
       if (!unloadingRef.current) {
-        setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
+        setNotice(
+          controller.signal.aborted
+            ? { kind: 'info', text: '已停止生成，未保存本轮内容' }
+            : { kind: 'error', text: e.message || '请求失败，请重试' },
+        );
         setPendings((ps) => ps.filter((p) => p.id !== pid));
         setPerms((ps) => ps.filter((x) => x.pid !== pid));
         setElis((ps) => ps.filter((x) => x.pid !== pid));

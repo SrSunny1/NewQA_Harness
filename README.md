@@ -9,12 +9,14 @@
 
 ```bash
 npm install
-npm run build    # 构建前端到 dist/
-npm start        # http://127.0.0.1:4173/（PORT 可覆盖）
+npm start        # 自动构建前端并启动：http://127.0.0.1:4173/（PORT 可覆盖）
 ```
 
-**必须先 `npm run build`**：服务端只托管 `dist/`（同源、无 CORS）。
-开发改前端可用 `npm run dev`（Vite 5173，不带后端接口）。
+**服务启动前会自动构建前端**：本地服务只托管 `dist/`（同源、无 CORS）。
+Windows 启动器冷启动时也会执行构建；如果服务已经在运行，修改前端后
+可手动执行 `npm run build` 并刷新页面，无需中断服务。
+
+开发前端可用 `npm run dev`（Vite 5173，后端需单独运行）。
 
 ### WSL + Windows 盘
 

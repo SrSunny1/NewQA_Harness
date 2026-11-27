@@ -929,6 +929,103 @@ test('dom：断流后重挂同一回合不重复内容', async () => {
   }
 });
 
+test('dom：首包前断线只重挂，不重发提问', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-early', title: '首包断线', turns: [], workspace: '', sessionId: null },
+      ],
+      activeId: 'cv-early',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  // POST 在拿到响应头之前断线：服务端可能已启动回合 → 只能 attach 接回，
+  // 不得二次 POST 同一问题。
+  chatResponder = () => {
+    throw new TypeError('network lost before headers');
+  };
+  attachResponder = () =>
+    ndjson([
+      { type: 'delta', text: '已从原回合续上' },
+      { type: 'done', sessionId: 'sess-early' },
+    ]);
+  const chatBase = chatCalls.length;
+  const attachBase = attachCalls.length;
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '首包前断线问题');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(80);
+    });
+    assert.equal(chatCalls.length - chatBase, 1, '问题只 POST 一次，未重发');
+    assert.equal(attachCalls.length - attachBase, 1, '断线后 attach 接回原回合');
+    assert.deepEqual(attachCalls.at(-1), {
+      convId: chatCalls.at(-1).body.convId,
+      turnId: chatCalls.at(-1).body.turnId,
+    });
+    assert.ok(!container.querySelector('.pending'), '重挂完成后 pending 已清');
+    assert.ok(!container.querySelector('#composer-main').disabled, '输入框可用');
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv = stored.conversations.find((c) => c.id === 'cv-early');
+    assert.equal(conv.turns.length, 1, '只入库一个回合');
+    assert.equal(conv.turns[0].question, '首包前断线问题');
+    assert.equal(conv.turns[0].answer, '已从原回合续上');
+    assert.equal(conv.sessionId, 'sess-early');
+  } finally {
+    chatResponder = null;
+    attachResponder = null;
+  }
+});
+
+test('dom：明确拒绝请求时不重挂', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-deny', title: '明确拒绝', turns: [], workspace: '', sessionId: null },
+      ],
+      activeId: 'cv-deny',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  // 服务端确定性 4xx：请求未开流，不得尝试 attach/重发
+  chatResponder = () => Response.json({ error: '选项无效' }, { status: 400 });
+  const attachBase = attachCalls.length;
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '无效选项问题');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(60);
+    });
+    assert.equal(attachCalls.length, attachBase, '4xx 不触发 attach');
+    assert.ok(!container.querySelector('.pending'), '无 pending 残影');
+    assert.ok(!ta.disabled, '输入框可用');
+    assert.equal(ta.value, '无效选项问题', '问题回填为草稿可修改重发');
+  } finally {
+    chatResponder = null;
+    attachResponder = null;
+  }
+});
+
 test('dom：断网后下次发送先清理精确旧回合', async () => {
   await unmountApp();
   window.localStorage.clear();
