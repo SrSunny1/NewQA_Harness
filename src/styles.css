@@ -27,6 +27,7 @@
   --sum-warn-b: #dc2626;
   --fusion-active-a: #08633b;
   --fusion-active-b: #0b795d;
+  --fusion-inactive: #a83364;
 }
 :root[data-theme='dark'] {
   --bg: #161616;
@@ -49,6 +50,7 @@
   --sum-warn-b: #f87171;
   --fusion-active-a: #a7f3a9;
   --fusion-active-b: #38e6b9;
+  --fusion-inactive: #f0a4c2;
 }
 
 /* 标注色（深浅主题通用，半透明） */
@@ -1273,13 +1275,12 @@ body {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 10px;
-  color: var(--ink-soft);
+  color: var(--fusion-inactive);
   background: var(--panel);
   transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 .fusion-pill.active {
   border-color: var(--fusion-active-a);
-  color: var(--ink);
   font-weight: 600;
 }
 .fusion-model-active {
@@ -2741,7 +2742,7 @@ body {
   overflow-wrap: anywhere;
   text-align: right;
   background-image: none;
-  color: var(--ink-soft);
+  color: var(--fusion-inactive);
 }
 
 /* ---------- 代码块复制按钮（零文本节点，不干扰选区偏移） ---------- */
