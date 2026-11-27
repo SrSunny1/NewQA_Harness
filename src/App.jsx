@@ -201,6 +201,7 @@ export default function App() {
   const abortsRef = useRef(new Map()); // pid → { controller, convId }
   const unloadingRef = useRef(false); // 页面卸载中：跳过一切清理，保住 inflight 供重挂
   const liveRangeRef = useRef(null);
+  const selBarElRef = useRef(null); // 划词浮条 DOM：挂载后按实测宽高再夹一次
   const hlRef = useRef({});
   const transcriptRef = useRef(null);
   const storeRef = useRef(store);
@@ -458,6 +459,28 @@ export default function App() {
       ? { ...devinOpts, config: modelOptsCache[cfgModelSel].config }
       : devinOpts;
 
+  // 浮条夹在正文可视区内：右边界随右侧栏宽度变化，不能伸进导航面板。
+  const selBarBounds = useCallback(() => {
+    const tb = transcriptRef.current?.getBoundingClientRect();
+    return {
+      left: (tb ? tb.left : 0) + 8,
+      // 预留浮条自身宽度（未测得时用 300 估计），保证不越出正文右缘
+      right: (tb ? tb.right : window.innerWidth) - 8,
+      top: (tb ? tb.top : 0) + 8,
+      bottom: (tb ? tb.bottom : window.innerHeight) - 8,
+    };
+  }, []);
+  const clampSelBar = useCallback(
+    (rect, barW = 300, barH = 44) => {
+      const b = selBarBounds();
+      return {
+        top: Math.max(b.top, Math.min(rect.bottom + 8, b.bottom - barH)),
+        left: Math.max(b.left, Math.min(rect.left, b.right - barW)),
+      };
+    },
+    [selBarBounds],
+  );
+
   // ---- 选区监听 ----
   useEffect(() => {
     const refresh = () => {
@@ -480,8 +503,7 @@ export default function App() {
         setSelBar({
           turnId: found.msgId,
           anchor: found.anchor,
-          top: Math.min(rect.bottom + 8, window.innerHeight - 60),
-          left: Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
+          ...clampSelBar(rect),
         });
       });
     };
@@ -489,27 +511,40 @@ export default function App() {
       const r = liveRangeRef.current;
       if (!r) return;
       const rect = r.getBoundingClientRect();
-      setSelBar((s) =>
-        s
-          ? {
-              ...s,
-              top: Math.min(rect.bottom + 8, window.innerHeight - 60),
-              left: Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
-            }
-          : s,
-      );
+      setSelBar((s) => (s ? { ...s, ...clampSelBar(rect) } : s));
     };
     document.addEventListener('selectionchange', refresh);
     document.addEventListener('pointerup', refresh);
     document.addEventListener('keyup', refresh);
     window.addEventListener('scroll', reposition, { capture: true, passive: true });
+    // 右侧栏拖拽只改正文盒宽度、不触发 window resize——用 RO 跟随重夹。
+    let ro = null;
+    if (typeof window.ResizeObserver === 'function' && transcriptRef.current) {
+      ro = new window.ResizeObserver(reposition);
+      ro.observe(transcriptRef.current);
+    }
     return () => {
       document.removeEventListener('selectionchange', refresh);
       document.removeEventListener('pointerup', refresh);
       document.removeEventListener('keyup', refresh);
       window.removeEventListener('scroll', reposition, { capture: true });
+      ro?.disconnect();
     };
-  }, []);
+  }, [clampSelBar]);
+
+  // 浮条挂载后按实测宽高再夹一次：本地化文案把条撑宽也不越出正文右缘。
+  // 仅在位置真的变化时才 setState，避免依赖自身更新的死循环。
+  useEffect(() => {
+    if (!selBar) return;
+    const el = selBarElRef.current;
+    if (!el) return;
+    const rect = liveRangeRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const pos = clampSelBar(rect, el.offsetWidth, el.offsetHeight);
+    setSelBar((s) =>
+      s && (s.top !== pos.top || s.left !== pos.left) ? { ...s, ...pos } : s,
+    );
+  }, [selBar, clampSelBar]);
 
   // 支线输入框 autoFocus 会在 commit 阶段把文档选区带进控件（jsdom 把
   // 控件选区计入 getSelection()）；挂载后再清一次，保证原生选区不留残。
@@ -2095,6 +2130,7 @@ export default function App() {
 
           {selBar && (
             <div
+              ref={selBarElRef}
               className="sel-bar markup-ui"
               style={{ top: selBar.top, left: selBar.left }}
               role="toolbar"

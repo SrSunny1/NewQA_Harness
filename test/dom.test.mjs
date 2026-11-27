@@ -524,6 +524,65 @@ test('dom：支线走 work 通道——独立会话 id、不污染主线 session
   }
 });
 
+test('dom：划词浮条夹在正文右缘内——右侧栏拉宽不遮条', async () => {
+  // jsdom 无布局：把 .transcript 右缘压到 400，模拟右侧栏被拉宽后的正文盒。
+  const transcript = container.querySelector('.transcript');
+  assert.ok(transcript, '转录容器存在');
+  transcript.getBoundingClientRect = () => ({
+    left: 0, top: 0, right: 400, bottom: 600,
+    width: 400, height: 600, x: 0, y: 0, toJSON: () => ({}),
+  });
+  // jsdom 的 offsetWidth 恒为 0；让 .sel-bar 量出 300，走实测尺寸重夹分支
+  const owDesc = Object.getOwnPropertyDescriptor(
+    window.HTMLElement.prototype,
+    'offsetWidth',
+  );
+  Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', {
+    configurable: true,
+    get() {
+      return this.classList?.contains('sel-bar') ? 300 : 0;
+    },
+  });
+  try {
+    const block = [
+      ...container.querySelectorAll('.source-block[data-block="0"]'),
+    ].find((el) => !el.closest('.branch-ui'));
+    assert.ok(block, '有已渲染的回答块');
+    const range = window.document.createRange();
+    range.selectNodeContents(block);
+    // 选区贴近正文右缘：旧算法（innerWidth-260）给 350 会伸进侧栏
+    range.getBoundingClientRect = () => ({
+      left: 350, right: 390, top: 90, bottom: 100,
+      width: 40, height: 10, x: 350, y: 90, toJSON: () => ({}),
+    });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    await act(async () => {
+      window.document.dispatchEvent(new window.Event('selectionchange'));
+      await tick(30);
+    });
+    const bar = container.querySelector('.sel-bar');
+    assert.ok(bar, '划词工具条出现');
+    // left = max(8, min(350, 400-8-300)) = 92；旧逻辑则是 350 越界
+    assert.equal(bar.style.left, '92px', '浮条右缘收进正文可视区');
+    assert.ok(
+      parseFloat(bar.style.left) + 300 <= 400 - 8,
+      '条尾不越正文右缘',
+    );
+  } finally {
+    window.getSelection().removeAllRanges();
+    if (owDesc) {
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', owDesc);
+    }
+    delete transcript.getBoundingClientRect;
+    await act(async () => {
+      window.document.dispatchEvent(new window.Event('selectionchange'));
+      await tick(10);
+    });
+  }
+});
+
 test('dom：回合进行中模型下拉禁用，完成后恢复', async () => {
   let release;
   const gate = new Promise((r) => (release = r));

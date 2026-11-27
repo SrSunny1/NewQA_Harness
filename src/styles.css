@@ -258,7 +258,7 @@ body {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-soft);
-  animation: rise 0.4s ease both;
+  animation: rise 0.4s ease backwards;
 }
 /* 搜索固定顶部、列表滚动、收起条固定底部 */
 .ws-groups {
@@ -446,7 +446,7 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  animation: rise 0.4s 0.05s ease both;
+  animation: rise 0.4s 0.05s ease backwards;
 }
 .transcript {
   flex: 1;
@@ -1660,7 +1660,7 @@ body {
   padding: 16px 12px;
   overflow-y: auto;
   background: var(--bg-soft);
-  animation: rise 0.4s 0.1s ease both;
+  animation: rise 0.4s 0.1s ease backwards;
 }
 .index-title {
   font-family: var(--serif);
@@ -1838,7 +1838,7 @@ body {
 .blank {
   text-align: center;
   padding: 8vh 20px 40px;
-  animation: rise 0.45s ease both;
+  animation: rise 0.45s ease backwards;
 }
 .blank-title {
   font-family: var(--serif);
