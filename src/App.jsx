@@ -62,6 +62,8 @@ import {
   stripFirstToken,
   parseFusionPairs,
   fusionIndices,
+  splitFusionUid,
+  prettifyModelKey,
 } from './fusion.js';
 import './styles.css';
 
@@ -210,6 +212,28 @@ async function uploadAttachments(images) {
   }
 }
 
+// 重挂/停止某个进行中的回合：convId 必填，turnId 有则精确绑定
+// （服务端会校验回合归属）；signal 供随本地 abort 一并撤销请求。
+function chatTurnRequest(action, { convId, turnId }, signal) {
+  return fetch(`/api/chat/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ convId, ...(turnId ? { turnId } : {}) }),
+    signal,
+  });
+}
+
+// 有界停止请求：确认送达（ok）或服务端已无此回合（404）才算停干净；
+// 超时/网络错误返回 false——调用方据此保留 interrupted 标记待重试。
+async function stopChatTurn(entry) {
+  try {
+    const res = await chatTurnRequest('stop', entry, AbortSignal.timeout(4000));
+    return res.ok || res.status === 404;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- 选区 → 锚点 ----------
 
 function blockElOf(node) {
@@ -259,35 +283,159 @@ function readAnchorFromRange(range) {
   return { msgId, anchor: { startBlock, startOffset, endBlock, endOffset, quote } };
 }
 
-// 锚点 → DOM Range 列表（按块内 textContent 偏移走文本节点）。
-function rangesForAnchor(msgId, anchor) {
+function textRangesInBlock(block, segStart, segEnd) {
   const ranges = [];
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  let pos = 0;
+  let node;
+  while ((node = walker.nextNode())) {
+    const len = node.data.length;
+    const ns = pos;
+    const ne = pos + len;
+    pos = ne;
+    if (ne > segStart && ns < segEnd) {
+      const s = Math.max(0, segStart - ns);
+      const e = Math.min(len, segEnd - ns);
+      if (e > s) {
+        const r = document.createRange();
+        r.setStart(node, s);
+        r.setEnd(node, e);
+        ranges.push(r);
+      }
+    }
+    if (pos >= segEnd) break;
+  }
+  return ranges;
+}
+
+function directAnchorPieces(msgId, anchor) {
+  if (anchor.startBlock > anchor.endBlock) return null;
+  const pieces = [];
+  const parts = [];
   for (let i = anchor.startBlock; i <= anchor.endBlock; i++) {
     const block = document.querySelector(
       `.source-block[data-msg="${msgId}"][data-block="${i}"]`,
     );
-    if (!block) continue;
-    const segStart = i === anchor.startBlock ? anchor.startOffset : 0;
-    const segEnd =
-      i === anchor.endBlock ? anchor.endOffset : (block.textContent || '').length;
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    let pos = 0;
-    let node;
-    while ((node = walker.nextNode())) {
-      const len = node.data.length;
-      const ns = pos;
-      const ne = pos + len;
-      pos = ne;
-      if (ne > segStart && ns < segEnd) {
-        const r = document.createRange();
-        r.setStart(node, Math.max(0, segStart - ns));
-        r.setEnd(node, Math.min(len, segEnd - ns));
-        ranges.push(r);
-      }
-      if (pos >= segEnd) break;
+    if (!block) return null;
+    const text = block.textContent || '';
+    const s = i === anchor.startBlock ? anchor.startOffset : 0;
+    const e = i === anchor.endBlock ? anchor.endOffset : text.length;
+    if (s > e || s > text.length || e > text.length) return null;
+    pieces.push({ block, start: s, end: e });
+    parts.push(text.slice(s, e));
+  }
+  return { pieces, text: parts.join('\n').slice(0, QUOTE_LIMIT) };
+}
+
+function sourceBlocksFor(msgId) {
+  return [...document.querySelectorAll(`.source-block[data-msg="${msgId}"]`)].sort(
+    (a, b) => Number(a.dataset.block) - Number(b.dataset.block),
+  );
+}
+
+function linearizeBlocks(blocks, separate, stripNewlines) {
+  let text = '';
+  const blockAt = [];
+  const offsetAt = [];
+  blocks.forEach((block, bi) => {
+    const content = block.textContent || '';
+    for (let i = 0; i < content.length; i++) {
+      const ch = content[i];
+      if (stripNewlines && (ch === '\n' || ch === '\r')) continue;
+      text += ch;
+      blockAt.push(bi);
+      offsetAt.push(i);
+    }
+    if (separate && bi < blocks.length - 1) {
+      text += '\n';
+      blockAt.push(-1);
+      offsetAt.push(-1);
+    }
+  });
+  return { text, blockAt, offsetAt };
+}
+
+function approxLinearPosition(blocks, anchor, separate, stripNewlines) {
+  const target = Math.min(anchor.startBlock, blocks.length - 1);
+  const lenOf = (text) => (stripNewlines ? text.replace(/[\r\n]/g, '').length : text.length);
+  let pos = 0;
+  for (let i = 0; i < target; i++) {
+    pos += lenOf(blocks[i].textContent || '') + (separate ? 1 : 0);
+  }
+  const content = blocks[target]?.textContent || '';
+  const rawPrefix = content.slice(0, Math.min(anchor.startOffset, content.length));
+  return pos + lenOf(rawPrefix);
+}
+
+function bestQuoteMatch(haystack, needle, approx) {
+  if (!needle) return -1;
+  let at = 0;
+  let best = -1;
+  let bestDist = Infinity;
+  for (;;) {
+    const found = haystack.indexOf(needle, at);
+    if (found < 0) break;
+    const dist = Math.abs(found - approx);
+    if (dist < bestDist) {
+      best = found;
+      bestDist = dist;
+    }
+    at = found + 1;
+  }
+  return best;
+}
+
+function rangesForLinearMatch(blocks, linear, start, end) {
+  const spans = new Map();
+  for (let pos = start; pos < end; pos++) {
+    const bi = linear.blockAt[pos];
+    if (bi < 0) continue;
+    const block = blocks[bi];
+    const offset = linear.offsetAt[pos];
+    const span = spans.get(block);
+    if (span) {
+      span.start = Math.min(span.start, offset);
+      span.end = Math.max(span.end, offset + 1);
+    } else {
+      spans.set(block, { start: offset, end: offset + 1 });
     }
   }
-  return ranges;
+  return [...spans.entries()].flatMap(([block, span]) =>
+    textRangesInBlock(block, span.start, span.end),
+  );
+}
+
+function quoteFallbackRanges(msgId, anchor) {
+  const quote = (anchor.quote || '').slice(0, QUOTE_LIMIT);
+  if (!quote.trim()) return [];
+  const blocks = sourceBlocksFor(msgId);
+  if (!blocks.length) return [];
+  const attempts = [
+    { separate: true, stripNewlines: false, needle: quote },
+    { separate: false, stripNewlines: true, needle: quote.replace(/[\r\n]/g, '') },
+  ];
+  for (const attempt of attempts) {
+    if (!attempt.needle) continue;
+    const linear = linearizeBlocks(blocks, attempt.separate, attempt.stripNewlines);
+    const approx = approxLinearPosition(
+      blocks,
+      anchor,
+      attempt.separate,
+      attempt.stripNewlines,
+    );
+    const at = bestQuoteMatch(linear.text, attempt.needle, approx);
+    if (at >= 0) return rangesForLinearMatch(blocks, linear, at, at + attempt.needle.length);
+  }
+  return [];
+}
+
+// 锚点 → DOM Range 列表（按块内 textContent 偏移走文本节点）。
+function rangesForAnchor(msgId, anchor) {
+  const direct = directAnchorPieces(msgId, anchor);
+  if (direct && direct.text === anchor.quote) {
+    return direct.pieces.flatMap((p) => textRangesInBlock(p.block, p.start, p.end));
+  }
+  return quoteFallbackRanges(msgId, anchor);
 }
 
 const samePath = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
@@ -858,11 +1006,39 @@ function QImgs({ srcs, urls }) {
   );
 }
 
-function PendingView({ pending, onStop }) {
+function formatTurnDuration(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  const remainder = seconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  if (hours) return `${hours} 小时 ${pad(minutes)} 分 ${pad(remainder)} 秒`;
+  if (minutes) return `${minutes} 分 ${pad(remainder)} 秒`;
+  return `${remainder} 秒`;
+}
+
+function TurnTimer({ startedAt }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <span className="turn-duration" role="timer" aria-live="off">
+      已用时 {formatTurnDuration(Math.max(0, now - startedAt))}
+    </span>
+  );
+}
+
+function PendingView({ pending, onStop, fusionNames = null }) {
   const { items } = useMemo(
     () => renderTimeline(pending.text, pending.tools),
     [pending.text, pending.tools],
   );
+  // fusion 回合：lead/sidekick 实时指示。role 缺省 lead——回合开始总是 lead 先动；
+  // liveModel 未上报时回落发送时的所选模型（modelAtSend）。
+  const fusion = fusionNames?.(pending.liveModel || pending.modelAtSend) || null;
+  const role = pending.role === 'sidekick' ? 'sidekick' : 'lead';
   return (
     <article className="turn pending" aria-live="polite" aria-label="正在生成回答">
       <div className="turn-q">
@@ -871,6 +1047,22 @@ function PendingView({ pending, onStop }) {
         )}
         {pending.question}
       </div>
+      {fusion && (
+        <div className="fusion-live" aria-label={`Fusion 配对，当前 ${role === 'sidekick' ? 'Sidekick' : 'Lead'} 在工作中`}>
+          <span className={`fusion-pill lead ${role === 'lead' ? 'active' : ''}`}>
+            Lead ·{' '}
+            <span className={role === 'lead' ? 'fusion-model-active' : undefined}>
+              {fusion.leadLabel}
+            </span>
+          </span>
+          <span className={`fusion-pill side ${role === 'sidekick' ? 'active' : ''}`}>
+            Sidekick ·{' '}
+            <span className={role === 'sidekick' ? 'fusion-model-active' : undefined}>
+              {fusion.sideLabel}
+            </span>
+          </span>
+        </div>
+      )}
       <div className="turn-a">
         {items.length === 0 && <div className="pending-dots">Devin 正在思考</div>}
         {items.map((item) =>
@@ -886,9 +1078,14 @@ function PendingView({ pending, onStop }) {
         )}
         {items.at(-1)?.html && <span className="cursor" aria-hidden="true" />}
       </div>
-      <button type="button" className="btn-stop markup-ui" onClick={onStop}>
-        ■ 停止生成
-      </button>
+      <div className="turn-actions markup-ui">
+        <button type="button" className="btn-stop markup-ui" onClick={onStop}>
+          ■ 停止生成
+        </button>
+        {Number.isSafeInteger(pending.startedAt) && pending.startedAt > 0 && (
+          <TurnTimer startedAt={pending.startedAt} />
+        )}
+      </div>
     </article>
   );
 }
@@ -992,6 +1189,11 @@ function TurnView(props) {
           <GitView changes={turn.changes} />
         </details>
       )}
+      {Number.isSafeInteger(turn.durationMs) && turn.durationMs >= 0 && (
+        <span className="turn-duration turn-duration-final markup-ui">
+          用时 {formatTurnDuration(turn.durationMs)}
+        </span>
+      )}
     </article>
   );
 }
@@ -1038,6 +1240,7 @@ function BranchPanel(props) {
               <PendingView
                 pending={pendingHere}
                 onStop={() => props.onStop(pendingHere.id)}
+                fusionNames={props.fusionNames}
               />
             )}
           </div>
@@ -1584,6 +1787,165 @@ function PermDialog({ perm, more = 0, onDecide }) {
         </button>
       </div>
       <p className="perm-note">仅单次生效；不会自动批准、没有「总是允许」。</p>
+    </div>
+  );
+}
+
+// agent 提问（elicitation form）：按 schema 渲染 单选/多选/自由文本；
+// allowOther 时追加「其他」自由输入。提交 = accept，跳过 = decline。
+function ElicitDialog({ eli, more = 0, onDecide }) {
+  const OTHER = '__other__';
+  const [answers, setAnswers] = useState({}); // key → string | string[]
+  const [otherText, setOtherText] = useState({}); // key → 自由输入
+  const setA = (key, v) => setAnswers((a) => ({ ...a, [key]: v }));
+  const setO = (key, v) => setOtherText((a) => ({ ...a, [key]: v }));
+  const toggleMulti = (key, value) =>
+    setAnswers((a) => {
+      const cur = Array.isArray(a[key]) ? a[key] : [];
+      return {
+        ...a,
+        [key]: cur.includes(value) ? cur.filter((x) => x !== value) : [...cur, value],
+      };
+    });
+  // 汇总 content：select 选「其他」时用自由输入；multi 把非空自由输入补进数组
+  const buildContent = () => {
+    const out = {};
+    for (const f of eli.fields) {
+      const v = answers[f.key];
+      const extra = (otherText[f.key] || '').trim();
+      if (f.kind === 'multi') {
+        const arr = Array.isArray(v) ? [...v] : [];
+        if (eli.allowOther && extra) arr.push(extra);
+        if (arr.length) out[f.key] = arr;
+      } else if (f.kind === 'select') {
+        if (v === OTHER) {
+          if (extra) out[f.key] = extra;
+        } else if (typeof v === 'string' && v) {
+          out[f.key] = v;
+        }
+      } else if (typeof v === 'string' && v.trim()) {
+        out[f.key] = v.trim();
+      }
+    }
+    return out;
+  };
+  // 必填校验：required 字段必须有有效答案才放行提交
+  const missingRequired = eli.fields.some((f) => {
+    if (!f.required) return false;
+    const v = answers[f.key];
+    if (f.kind === 'multi') return !Array.isArray(v) || (!v.length && !(otherText[f.key] || '').trim());
+    if (f.kind === 'select') {
+      if (v === OTHER) return !(otherText[f.key] || '').trim();
+      return !v;
+    }
+    return !(typeof v === 'string' && v.trim());
+  });
+  return (
+    <div className="perm-card elicit-card markup-ui" role="alertdialog" aria-label="Devin 的提问">
+      <div className="perm-head">
+        <strong>Devin 想问一下</strong>
+        {more > 0 && <span className="perm-more">还有 {more} 个提问</span>}
+      </div>
+      {eli.message && <p className="perm-title">{eli.message}</p>}
+      {eli.fields.map((f) => (
+        <div className="elicit-field" key={f.key}>
+          <div className="elicit-field-title">
+            {f.title}
+            {f.required && <span className="elicit-req">必填</span>}
+          </div>
+          {f.description && <div className="elicit-field-desc">{f.description}</div>}
+          {f.kind === 'select' && (
+            <div className="elicit-options" role="radiogroup" aria-label={f.title}>
+              {f.options.map((o) => (
+                <label className="elicit-option" key={o.value}>
+                  <input
+                    type="radio"
+                    name={`eli-${eli.requestId}-${f.key}`}
+                    checked={answers[f.key] === o.value}
+                    onChange={() => setA(f.key, o.value)}
+                  />
+                  <span>
+                    {o.label}
+                    {o.description && <small>{o.description}</small>}
+                  </span>
+                </label>
+              ))}
+              {eli.allowOther && (
+                <label className="elicit-option">
+                  <input
+                    type="radio"
+                    name={`eli-${eli.requestId}-${f.key}`}
+                    checked={answers[f.key] === OTHER}
+                    onChange={() => setA(f.key, OTHER)}
+                  />
+                  <span>
+                    其他
+                    <input
+                      type="text"
+                      className="elicit-other-input"
+                      placeholder="自己填写…"
+                      value={otherText[f.key] || ''}
+                      onChange={(e) => {
+                        setO(f.key, e.target.value);
+                        if (answers[f.key] !== OTHER) setA(f.key, OTHER);
+                      }}
+                    />
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
+          {f.kind === 'multi' && (
+            <div className="elicit-options" role="group" aria-label={f.title}>
+              {f.options.map((o) => (
+                <label className="elicit-option" key={o.value}>
+                  <input
+                    type="checkbox"
+                    checked={(Array.isArray(answers[f.key]) ? answers[f.key] : []).includes(o.value)}
+                    onChange={() => toggleMulti(f.key, o.value)}
+                  />
+                  <span>
+                    {o.label}
+                    {o.description && <small>{o.description}</small>}
+                  </span>
+                </label>
+              ))}
+              {eli.allowOther && (
+                <input
+                  type="text"
+                  className="elicit-other-input"
+                  placeholder="其他（可补充）…"
+                  value={otherText[f.key] || ''}
+                  onChange={(e) => setO(f.key, e.target.value)}
+                />
+              )}
+            </div>
+          )}
+          {f.kind === 'text' && (
+            <input
+              type="text"
+              className="elicit-text-input"
+              value={answers[f.key] || ''}
+              placeholder="输入回答…"
+              onChange={(e) => setA(f.key, e.target.value)}
+            />
+          )}
+        </div>
+      ))}
+      <div className="perm-ops">
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={missingRequired}
+          onClick={() => onDecide(eli.requestId, 'accept', buildContent())}
+        >
+          提交回答
+        </button>
+        <button type="button" className="mini-btn" onClick={() => onDecide(eli.requestId, 'decline')}>
+          跳过
+        </button>
+      </div>
+      <p className="perm-note">回答只发给本轮 Devin 会话；跳过则 Devin 自行决定怎么做。</p>
     </div>
   );
 }
@@ -2816,6 +3178,7 @@ export default function App() {
   const [imgs, setImgs] = useState({}); // draftKey → [{data,mime,thumb}] 粘贴附图
   const [pendings, setPendings] = useState([]); // 各对话可并行：进行中回合列表
   const [perms, setPerms] = useState([]);
+  const [elis, setElis] = useState([]); // agent 提问（elicitation）表单队列
   const [notice, setNotice] = useState(null);
   const [selBar, setSelBar] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -2840,6 +3203,7 @@ export default function App() {
   const [devinOpts, setDevinOpts] = useState({ status: 'idle', commands: null, config: null });
   const optsRequested = useRef(false);
   const abortsRef = useRef(new Map()); // pid → { controller, convId }
+  const unloadingRef = useRef(false); // 页面卸载中：跳过一切清理，保住 inflight 供重挂
   const liveRangeRef = useRef(null);
   const hlRef = useRef({});
   const transcriptRef = useRef(null);
@@ -2910,6 +3274,26 @@ export default function App() {
     const sc = transcriptRef.current;
     if (sc) sc.scrollTop = sc.scrollHeight;
     setShowScrollDown(false);
+  }, []);
+
+  // 页面卸载标记：刷新/关闭时浏览器 abort 在途 fetch，catch/finally 若照常
+  // 清理会把 localStorage 里的 inflight 删掉，刷新后无从重挂。bfcache 回退
+  // 经 pageshow 复位。
+  useEffect(() => {
+    const onHide = () => {
+      unloadingRef.current = true;
+    };
+    const onShow = () => {
+      unloadingRef.current = false;
+    };
+    window.addEventListener('beforeunload', onHide);
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('pageshow', onShow);
+    return () => {
+      window.removeEventListener('beforeunload', onHide);
+      window.removeEventListener('pagehide', onHide);
+      window.removeEventListener('pageshow', onShow);
+    };
   }, []);
 
   // ---- 布局持久化 ----
@@ -3069,9 +3453,20 @@ export default function App() {
     };
   }, []);
 
-  // ---- 高亮标注（CSS Custom Highlight API，不支持时降级为块级标记） ----
+  // 支线输入框 autoFocus 会在 commit 阶段把文档选区带进控件（jsdom 把
+  // 控件选区计入 getSelection()）；挂载后再清一次，保证原生选区不留残。
   useLayoutEffect(() => {
-    const marks = conv ? collectMarks(conv.turns) : [];
+    if (focusBranchId) window.getSelection()?.removeAllRanges();
+  }, [focusBranchId]);
+
+  // ---- 高亮标注（CSS Custom Highlight API，不支持时降级为块级标记） ----
+  // 读 storeRef 而非渲染期 conv：MutationObserver 回调里也能拿到最新会话。
+  const applyMarks = useCallback(() => {
+    const c =
+      storeRef.current.conversations.find(
+        (x) => x.id === storeRef.current.activeId,
+      ) || null;
+    const marks = c ? collectMarks(c.turns) : [];
     if (!hlSupported) {
       document
         .querySelectorAll('.source-block.marked')
@@ -3080,25 +3475,29 @@ export default function App() {
             'marked',
             'marked-note',
             'marked-branch',
-            ...NOTE_COLORS.map((c) => `marked-${c}`),
+            ...NOTE_COLORS.map((c2) => `marked-${c2}`),
           ),
         );
       for (const m of marks) {
         const anchor = (m.note || m.branch).anchor;
-        for (let i = anchor.startBlock; i <= anchor.endBlock; i++) {
-          document
-            .querySelector(`.source-block[data-msg="${m.turnId}"][data-block="${i}"]`)
-            ?.classList.add(
-              'marked',
-              m.kind === 'note' ? 'marked-note' : 'marked-branch',
-              ...(m.kind === 'note' ? [`marked-${m.note.color}`] : []),
-            );
+        const blocks = new Set();
+        for (const r of rangesForAnchor(m.turnId, anchor)) {
+          const el = blockElOf(r.startContainer) || blockElOf(r.endContainer);
+          if (el) blocks.add(el);
+        }
+        for (const el of blocks) {
+          el.classList.add(
+            'marked',
+            m.kind === 'note' ? 'marked-note' : 'marked-branch',
+            ...(m.kind === 'note' ? [`marked-${m.note.color}`] : []),
+          );
         }
       }
       return;
     }
     // 桶：nq-n-{color}（无笔记）/ nq-n-{color}-u（有笔记加下划线）/ nq-branch
     const used = new Set();
+    const cleared = new Set(); // 每轮每个桶只 clear 一次：同色多条标注共桶
     for (const m of marks) {
       const anchor = (m.note || m.branch).anchor;
       const name =
@@ -3106,11 +3505,14 @@ export default function App() {
           ? `nq-n-${m.note.color}${m.note.text.trim() ? '-u' : ''}`
           : 'nq-branch';
       used.add(name);
-      if (!hlRef.current[name]) {
-        hlRef.current[name] = new Highlight();
-        CSS.highlights.set(name, hlRef.current[name]);
-      } else {
-        hlRef.current[name].clear();
+      if (!cleared.has(name)) {
+        cleared.add(name);
+        if (!hlRef.current[name]) {
+          hlRef.current[name] = new Highlight();
+          CSS.highlights.set(name, hlRef.current[name]);
+        } else {
+          hlRef.current[name].clear();
+        }
       }
       for (const r of rangesForAnchor(m.turnId, anchor)) hlRef.current[name].add(r);
     }
@@ -3120,9 +3522,44 @@ export default function App() {
         delete hlRef.current[name];
       }
     }
-    // 依赖 conv 而非每次渲染：打字/流式只改 drafts/pendings，
-    // DOM 结构不变，不必重算 Range——否则每个按键都阻塞绘制
-  }, [conv, hlSupported]);
+  }, [hlSupported]);
+
+  // 依赖 conv 而非每次渲染：打字/流式只改 drafts/pendings，
+  // DOM 结构不变，不必重算 Range——否则每个按键都阻塞绘制
+  useLayoutEffect(() => {
+    applyMarks();
+  }, [conv, applyMarks]);
+
+  // conv 不变但已提交块（.source-block[data-msg]）重挂载时 Range 会失效
+  // （React 重建 DOM 节点），用 MutationObserver 兜底重放。pending/流式块
+  // 没有 data-msg，打字流式不触发，不引入每键开销。rAF 合帧。
+  useEffect(() => {
+    const root = transcriptRef.current;
+    if (!root || typeof window.MutationObserver !== 'function') return undefined;
+    let raf = 0;
+    const touchesMarks = (n) =>
+      n.nodeType === 1 &&
+      (n.matches?.('.source-block[data-msg]') ||
+        !!n.querySelector?.('.source-block[data-msg]'));
+    const mo = new window.MutationObserver((muts) => {
+      const hit = muts.some(
+        (mu) =>
+          [...mu.addedNodes].some(touchesMarks) ||
+          [...mu.removedNodes].some(touchesMarks),
+      );
+      if (hit && !raf) {
+        raf = window.requestAnimationFrame(() => {
+          raf = 0;
+          applyMarks();
+        });
+      }
+    });
+    mo.observe(root, { childList: true, subtree: true });
+    return () => {
+      mo.disconnect();
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [applyMarks]);
 
   // ---- 变更辅助 ----
   const mutateConv = useCallback((convId, fn) => {
@@ -3525,6 +3962,15 @@ export default function App() {
   const addInflight = (entry) => writeInflight([...readInflight(), entry]);
   const removeInflight = (pid) =>
     writeInflight(readInflight().filter((e) => e.pid !== pid));
+  // 停止请求没送达时保留精确 turnId，下一次发送前再清理。
+  const markInterrupted = (pid) =>
+    writeInflight(
+      readInflight().map((e) => (e.pid === pid ? { ...e, interrupted: true } : e)),
+    );
+  const finishInflight = (pid) => {
+    const list = readInflight();
+    writeInflight(list.filter((e) => e.pid !== pid || e.interrupted === true));
+  };
 
   // 消费 NDJSON 流（首发与重挂共用）：delta/tool/permission 上屏，
   // done 提交完整回合；中断/错误存不完整回合；stopped 不存。
@@ -3540,17 +3986,29 @@ export default function App() {
       draftKey = '',
       modelAtSend = '',
       speedAtSend = '',
+      turnId,
+      sessionId: requestedSessionId = null,
+      allowReconnect = true,
       controller,
       restoreImages = null,
     } = ctx;
+    // 服务端回合起始时间经响应头透传：重挂（attach）时用服务端时间，
+    // 计时跨刷新连续而不是从 0 重计。
+    const startedAt = Number(res.headers.get('X-NewQA-Turn-Started-At'));
+    if (Number.isSafeInteger(startedAt) && startedAt > 0) {
+      setPendings((ps) => ps.map((p) => (p.id === pid ? { ...p, startedAt } : p)));
+    }
     let acc = '';
     let toolsAcc = [];
     let changes = null;
     let doneSessionId = null;
     let doneModel = null; // done 上报的本轮实际生效模型
+    let durationMs; // done 上报的本轮耗时（createTurn 校验入库）
     let finished = false;
     let streamErr = null;
     let stoppedSeen = false; // 服务端广播的主动停止
+    let resetSession = false; // 服务端报告原生会话失效 → 清掉存的 sessionId 重试
+    let replaying = false; // 断流后已切到 attach 重挂流：收尾归重挂分支负责
     try {
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -3591,6 +4049,34 @@ export default function App() {
                   },
                 ],
           );
+        } else if (ev.type === 'elicitation' && ev.requestId) {
+          setElis((ps) =>
+            ps.some((x) => x.requestId === ev.requestId)
+              ? ps
+              : [
+                  ...ps,
+                  {
+                    requestId: ev.requestId,
+                    pid,
+                    message: typeof ev.message === 'string' ? ev.message : '',
+                    fields: Array.isArray(ev.fields) ? ev.fields : [],
+                    allowOther: ev.allowOther === true,
+                  },
+                ],
+          );
+        } else if (ev.type === 'role' && (ev.role === 'lead' || ev.role === 'sidekick')) {
+          setPendings((ps) => ps.map((p) => (p.id === pid ? { ...p, role: ev.role } : p)));
+        } else if (ev.type === 'model' && typeof ev.model === 'string' && ev.model) {
+          // 回合中上报的实际模型：fusion 指示器与 pending 展示（done 另有最终值）；
+          // 模型真的变了 = 新主导者接管，角色复位 lead（与服务端对齐）。
+          const m = ev.model.slice(0, 128);
+          setPendings((ps) =>
+            ps.map((p) =>
+              p.id === pid
+                ? { ...p, liveModel: m, role: p.liveModel === m ? p.role : 'lead' }
+                : p,
+            ),
+          );
         } else if (ev.type === 'git' && ev.snapshot) {
           changes = ev.snapshot;
         } else if (ev.type === 'done') {
@@ -3598,10 +4084,12 @@ export default function App() {
           doneSessionId = typeof ev.sessionId === 'string' ? ev.sessionId : null;
           doneModel =
             typeof ev.model === 'string' && ev.model ? ev.model.slice(0, 128) : null;
+          durationMs = ev.durationMs;
         } else if (ev.type === 'stopped') {
           stoppedSeen = true;
         } else if (ev.type === 'error') {
           streamErr = ev.message || '发生未知错误';
+          resetSession = ev.code === 'session_load_failed';
         }
       };
       for (;;) {
@@ -3617,7 +4105,7 @@ export default function App() {
       buf += dec.decode();
       if (buf.trim()) handleLine(buf);
       if (streamErr) throw new Error(streamErr);
-      if (!finished) throw new Error('连接中断，回答不完整，未保存本轮内容');
+      if (!finished) throw new Error('连接中断，回答不完整，可以继续提问');
       // 提交完整回合；期间新增的笔记/支线通过函数式更新保留。
       setStore((s) => ({
         ...s,
@@ -3629,6 +4117,7 @@ export default function App() {
             images: thumbs,
             imageUrls,
             model: doneModel,
+            durationMs,
           });
           const appended = appendTurn(c2.turns, path, turn);
           // 支线回合的会话 id 写回支线节点（主线仍写会话级 sessionId）
@@ -3654,52 +4143,120 @@ export default function App() {
       }));
       setPendings((ps) => ps.filter((p) => p.id !== pid));
       setPerms((ps) => ps.filter((x) => x.pid !== pid));
+      setElis((ps) => ps.filter((x) => x.pid !== pid));
     } catch (e) {
-      const aborted = stoppedSeen || e.name === 'AbortError' || controller?.signal.aborted;
-      if (aborted) {
-        setNotice({ kind: 'info', text: '已停止生成，未保存本轮内容' });
-      } else {
-        setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
+      // 传输层断开（EOF/读异常且无终止事件）：回合在服务端多半还在跑，
+      // 先按 turnId 精确 attach 重挂；重挂不上才走本地失败收尾。
+      const transportLost =
+        !streamErr && !finished && !stoppedSeen && !controller?.signal.aborted;
+      let replayStatus = null;
+      if (!unloadingRef.current && allowReconnect && turnId && transportLost) {
+        let replay;
+        try {
+          replay = await chatTurnRequest('attach', { convId, turnId }, controller?.signal);
+        } catch {}
+        replayStatus = replay?.status ?? null;
+        if (!unloadingRef.current && !controller?.signal.aborted && replay?.ok && replay.body) {
+          replaying = true;
+          // 重挂流从头重放：清掉本地已累计的流式内容与未决表单，避免重复上屏
+          setPendings((ps) =>
+            ps.map((p) =>
+              p.id === pid
+                ? { ...p, text: '', tools: [], role: 'lead', liveModel: '' }
+                : p,
+            ),
+          );
+          setPerms((ps) => ps.filter((x) => x.pid !== pid));
+          setElis((ps) => ps.filter((x) => x.pid !== pid));
+          return await consumeChatStream(replay, { ...ctx, allowReconnect: false });
+        }
       }
-      setPendings((ps) => ps.filter((p) => p.id !== pid));
-      setPerms((ps) => ps.filter((x) => x.pid !== pid));
-      // 非主动停止且已有流出内容：存为不完整回合，避免问答整段丢失
-      let savedPartial = false;
-      if (!aborted && (acc.trim() || toolsAcc.length)) {
-        savedPartial = true;
-        const partial = createTurn(
-          question,
-          acc.trim()
-            ? `${acc}\n\n（⚠ 生成中断，回答不完整）`
-            : '（⚠ 生成中断，未产生回答内容）',
-          { tools: toolsAcc, changes, images: thumbs, imageUrls, model: doneModel },
-        );
-        setStore((s) => ({
-          ...s,
-          conversations: s.conversations.map((c2) =>
-            c2.id !== convId
-              ? c2
-              : {
-                  ...c2,
-                  title:
-                    !c2.titleCustomized && !path.length && c2.turns.length === 0
-                      ? titleFromQuestion(question)
-                      : c2.title,
-                  turns: appendTurn(c2.turns, path, partial),
-                },
-          ),
-        }));
+      // 重挂失败或重挂流又断：回合可能在服务端空跑——尽力停掉它
+      // （404 = 服务端已无此回合，免发）。停不到就留 interrupted 标记，
+      // 下一次发送前按精确 turnId 再清理，避免旧回合挂起导致 409。
+      if (
+        !unloadingRef.current &&
+        turnId &&
+        transportLost &&
+        !controller?.signal.aborted &&
+        replayStatus !== 404
+      ) {
+        if (!(await stopChatTurn({ convId, turnId }))) markInterrupted(pid);
       }
-      // 失败/停止且未存部分回合：输入框已清空，回填原文与附图便于修改后重试
-      if (!savedPartial && draftKey) {
-        setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
-        if (restoreImages?.length) {
-          setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: restoreImages }));
+      // 页面卸载触发的 abort：一切收尾都跳过——inflight 留给重挂，
+      // 不落不完整回合、不回填草稿、不弹提示。
+      if (!unloadingRef.current) {
+        // 显式停止 = 服务端广播 stopped 或本地 controller abort；
+        // 传输丢失产生的裸 AbortError 不算主动停止。
+        const aborted = stoppedSeen || controller?.signal.aborted;
+        if (aborted) {
+          setNotice({ kind: 'info', text: '已停止生成，未保存本轮内容' });
+        } else {
+          setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
+        }
+        setPendings((ps) => ps.filter((p) => p.id !== pid));
+        setPerms((ps) => ps.filter((x) => x.pid !== pid));
+        setElis((ps) => ps.filter((x) => x.pid !== pid));
+        // 非主动停止且已有流出内容：存为不完整回合，避免问答整段丢失
+        let savedPartial = false;
+        if (!aborted && (acc.trim() || toolsAcc.length)) {
+          savedPartial = true;
+          const partial = createTurn(
+            question,
+            acc.trim()
+              ? `${acc}\n\n（⚠ 生成中断，回答不完整）`
+              : '（⚠ 生成中断，未产生回答内容）',
+            { tools: toolsAcc, changes, images: thumbs, imageUrls, model: doneModel },
+          );
+          setStore((s) => ({
+            ...s,
+            conversations: s.conversations.map((c2) =>
+              c2.id !== convId
+                ? c2
+                : {
+                    ...c2,
+                    title:
+                      !c2.titleCustomized && !path.length && c2.turns.length === 0
+                        ? titleFromQuestion(question)
+                        : c2.title,
+                    turns: appendTurn(c2.turns, path, partial),
+                  },
+            ),
+          }));
+        }
+        // 失败/停止且未存部分回合：输入框已清空，回填原文与附图便于修改后重试
+        if (!savedPartial && draftKey) {
+          setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
+          if (restoreImages?.length) {
+            setImgs((d) =>
+              d[draftKey]?.length ? d : { ...d, [draftKey]: restoreImages },
+            );
+          }
+        }
+        // 服务端报告原生会话失效：清掉存的会话 id（主线字段 / 支线节点），
+        // 下次发送回落本地历史续聊，不再撞同一个死会话；不删任何转录内容。
+        if (resetSession && requestedSessionId) {
+          setStore((s) => ({
+            ...s,
+            conversations: s.conversations.map((c) => {
+              if (c.id !== convId) return c;
+              if (!path.length) {
+                return c.sessionId === requestedSessionId ? { ...c, sessionId: null } : c;
+              }
+              return branchSessionAt(c.turns, path) === requestedSessionId
+                ? { ...c, turns: setBranchSession(c.turns, path, null) }
+                : c;
+            }),
+          }));
         }
       }
     } finally {
-      abortsRef.current.delete(pid);
-      removeInflight(pid);
+      // 已切到 attach 重挂流时，本轮收尾（aborts/inflight）归重挂调用负责；
+      // finishInflight 会保留 interrupted 标记项供下次发送清理。
+      if (!replaying) {
+        abortsRef.current.delete(pid);
+        if (!unloadingRef.current) finishInflight(pid);
+      }
     }
   }, []);
 
@@ -3708,7 +4265,11 @@ export default function App() {
     async (en) => {
       if (abortsRef.current.has(en.pid)) return;
       const controller = new AbortController();
-      abortsRef.current.set(en.pid, { controller, convId: en.convId });
+      abortsRef.current.set(en.pid, {
+        controller,
+        convId: en.convId,
+        turnId: en.turnId, // 旧 inflight 无此字段 → undefined，attach 不携带
+      });
       setPendings((ps) =>
         ps.some((p) => p.id === en.pid)
           ? ps
@@ -3724,32 +4285,45 @@ export default function App() {
                 kind: 'work',
                 images: en.images || [],
                 imageUrls: en.imageUrls || null,
+                modelAtSend: en.modelAtSend || '',
+                startedAt: en.startedAt,
               },
             ],
       );
+      // attach 必须落地本地状态：abort/失败都不留 pending 与 inflight 残影
       let res;
       try {
-        res = await fetch('/api/chat/attach', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ convId: en.convId }),
-          signal: controller.signal,
-        });
-      } catch (e) {
-        if (e.name !== 'AbortError') {
-          setPendings((ps) => ps.filter((p) => p.id !== en.pid));
-          abortsRef.current.delete(en.pid);
-          removeInflight(en.pid);
+        res = await chatTurnRequest('attach', en, controller.signal);
+      } catch {}
+      if (!res?.ok || !res.body) {
+        // attach 不上且原因不明（非 404、非本地 abort）：服务端回合可能
+        // 仍在跑——尽力精确停掉；停不到留 interrupted 标记待下次发送清理。
+        if (
+          !unloadingRef.current &&
+          !controller.signal.aborted &&
+          en.turnId &&
+          res?.status !== 404
+        ) {
+          if (!(await stopChatTurn(en))) markInterrupted(en.pid);
         }
-        return;
-      }
-      if (!res.ok || !res.body) {
-        // 404 = 服务端已无此回合（重启/回放过期）→ 丢弃残留标记
-        setPendings((ps) => ps.filter((p) => p.id !== en.pid));
         abortsRef.current.delete(en.pid);
-        removeInflight(en.pid);
-        if (res.status === 404) {
-          setNotice({ kind: 'info', text: '有进行中的回合因服务重启未能恢复' });
+        if (!unloadingRef.current) {
+          setPendings((ps) => ps.filter((p) => p.id !== en.pid));
+          setPerms((ps) => ps.filter((x) => x.pid !== en.pid));
+          setElis((ps) => ps.filter((x) => x.pid !== en.pid));
+          finishInflight(en.pid);
+          // 输入框已被清空过才回填；已有新草稿时不覆盖
+          if (en.draftKey) {
+            setDrafts((d) =>
+              d[en.draftKey] ? d : { ...d, [en.draftKey]: en.question },
+            );
+          }
+          setNotice({
+            kind: 'info',
+            text: controller.signal.aborted
+              ? '已停止生成，未保存本轮内容'
+              : '未能恢复进行中的回合，可以继续提问',
+          });
         }
         return;
       }
@@ -3763,6 +4337,8 @@ export default function App() {
         draftKey: en.draftKey || '',
         modelAtSend: en.modelAtSend || '',
         speedAtSend: en.speedAtSend || '',
+        turnId: en.turnId,
+        sessionId: en.sessionId,
         controller,
       });
     },
@@ -3778,6 +4354,8 @@ export default function App() {
         removeInflight(en.pid);
         continue;
       }
+      // 中断标记项不重挂（部分内容/草稿已落库），留给下次发送精确清理
+      if (en.interrupted === true) continue;
       reattachTurn(en);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3814,7 +4392,22 @@ export default function App() {
     }
     const pid = makeId();
     const controller = new AbortController();
-    abortsRef.current.set(pid, { controller, convId });
+    // turnId = 本回合唯一标识（pid）：attach/stop 据此绑定精确回合
+    abortsRef.current.set(pid, { controller, convId, turnId: pid });
+    // 上次断网留下的中断回合：先按精确 turnId 清理服务端旧回合再发新
+    // 回合，避免旧回合仍挂起（如在等权限）导致并发冲突；停不到则不发。
+    for (const en of readInflight()) {
+      if (en.convId !== convId || en.interrupted !== true || !en.turnId) continue;
+      if (!(await stopChatTurn(en))) {
+        abortsRef.current.delete(pid);
+        setNotice({
+          kind: 'error',
+          text: '无法连接服务以清理中断的回合，请恢复连接后重试',
+        });
+        return;
+      }
+      removeInflight(en.pid);
+    }
     const thumbs = images.map((i) => i.thumb).filter(Boolean);
     const imageUrls = images?.length ? await uploadAttachments(images) : null;
     // 本轮使用的 model 选择快照：done 上报的生效值与"哪次选择"绑定，
@@ -3823,6 +4416,7 @@ export default function App() {
       typeof c.modelConfig?.model === 'string' ? c.modelConfig.model : '';
     const speedAtSend =
       typeof c.modelConfig?.speed === 'string' ? c.modelConfig.speed : '';
+    const startedAt = Date.now();
     setPendings((ps) => [
       ...ps,
       {
@@ -3835,6 +4429,8 @@ export default function App() {
         kind,
         images: thumbs,
         imageUrls,
+        modelAtSend,
+        startedAt,
       },
     ]);
     // 提交即清空输入框与附图（内容已显示在回合气泡里）；失败时在 catch 回填。
@@ -3842,10 +4438,13 @@ export default function App() {
       setDrafts((d) => ({ ...d, [draftKey]: '' }));
       setImgs((d) => ({ ...d, [draftKey]: [] }));
     }
-    // inflight 落盘：刷新页面后可按 convId 重挂服务端回合
+    // inflight 落盘：刷新页面后可按 convId+turnId 重挂服务端回合；
+    // sessionId 一并存：原生会话失效的错误事件需要知道清哪条线
     addInflight({
       pid,
       convId,
+      turnId: pid,
+      sessionId: sessId,
       path: [...path],
       question,
       images: thumbs,
@@ -3853,14 +4452,14 @@ export default function App() {
       draftKey: draftKey || '',
       modelAtSend,
       speedAtSend,
-      startedAt: Date.now(),
+      startedAt,
     });
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          buildChatBody({
+        body: JSON.stringify({
+          ...buildChatBody({
             conv: c,
             kind,
             history,
@@ -3869,7 +4468,8 @@ export default function App() {
             images,
             sessionId: sessId,
           }),
-        ),
+          turnId: pid,
+        }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -3890,34 +4490,40 @@ export default function App() {
         draftKey,
         modelAtSend,
         speedAtSend,
+        turnId: pid,
+        sessionId: sessId,
         controller,
         restoreImages: images,
       });
     } catch (e) {
-      // 仅覆盖发出前的失败（网络错误/4xx 未开流）；流内错误 consume 内部已收尾
-      setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
-      setPendings((ps) => ps.filter((p) => p.id !== pid));
-      setPerms((ps) => ps.filter((x) => x.pid !== pid));
-      if (draftKey) {
-        setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
-        setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
+      // 仅覆盖发出前的失败（网络错误/4xx 未开流）；流内错误 consume 内部已收尾。
+      // 页面卸载中的 abort 一并跳过，保住 inflight。
+      if (!unloadingRef.current) {
+        setNotice({ kind: 'error', text: e.message || '请求失败，请重试' });
+        setPendings((ps) => ps.filter((p) => p.id !== pid));
+        setPerms((ps) => ps.filter((x) => x.pid !== pid));
+        setElis((ps) => ps.filter((x) => x.pid !== pid));
+        if (draftKey) {
+          setDrafts((d) => (d[draftKey] ? d : { ...d, [draftKey]: question }));
+          setImgs((d) => (d[draftKey]?.length ? d : { ...d, [draftKey]: images }));
+        }
+        finishInflight(pid);
       }
       abortsRef.current.delete(pid);
-      removeInflight(pid);
     }
   }, [consumeChatStream]);
 
   const onStop = useCallback((pid) => {
     const entry = abortsRef.current.get(pid);
-    if (!entry) return;
-    // 通知服务端真正中止回合（kill acp 进程）→ 回合广播 stopped 收尾；
-    // 本地 abort 兜底：服务端不可达时至少断开本地流。
-    fetch('/api/chat/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ convId: entry.convId }),
-    }).catch(() => {});
-    entry.controller.abort();
+    if (!entry || entry.stopping) return;
+    entry.stopping = true;
+    // 有界停止请求：确认送达/已收尾后本地 abort 解锁 UI——过早解锁会让
+    // 用户以为已停；超时/断网送不达时保留 interrupted 标记（下次发送
+    // 前按精确 turnId 再清理），本地 abort 仍兜底断开本地流。
+    void stopChatTurn(entry).then((stopped) => {
+      if (!stopped && entry.turnId) markInterrupted(pid);
+      entry.controller.abort();
+    });
   }, []);
 
   const decidePerm = useCallback(async (requestId, optionId) => {
@@ -3936,10 +4542,29 @@ export default function App() {
     }
   }, []);
 
+  // elicitation 作答：action accept（带 content）/ decline（跳过）。
+  // 404 = 回合已收尾，静默丢弃即可。
+  const decideEli = useCallback(async (requestId, action, content) => {
+    setElis((ps) => ps.filter((p) => p.requestId !== requestId));
+    try {
+      const res = await fetch('/api/chat/elicitation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId, action, content }),
+      });
+      if (!res.ok && res.status !== 404) {
+        setNotice({ kind: 'error', text: '回答发送失败，请重试' });
+      }
+    } catch {
+      setNotice({ kind: 'error', text: '回答发送失败，请重试' });
+    }
+  }, []);
+
   // ---- 标注 / 支线 ----
   const clearSel = () => {
     setSelBar(null);
     liveRangeRef.current = null;
+    window.getSelection()?.removeAllRanges();
   };
 
   // 纯色块：只建高亮标注，不打开编辑器、不展开索引。
@@ -4077,6 +4702,8 @@ export default function App() {
   const mainPending =
     conv && pendings.find((p) => p.convId === conv.id && p.path.length === 0);
   const mainPendingHere = !!mainPending;
+  // 本对话任一 work 回合在跑（主线或支线）→ 设置摘要里联动高亮 fusion 模型名
+  const settingsPending = conv && pendings.find((p) => p.convId === conv.id && p.kind === 'work');
   // 待删除工作区的会话数与生成中状态（删除弹窗展示/禁用用）
   const delWsCount = delWs
     ? store.conversations.filter((c) => c.workspace === delWs).length
@@ -4105,6 +4732,26 @@ export default function App() {
     [focusNoteId, marks],
   );
 
+  // fusion uid → {leadLabel, sideLabel}：优先探测选项里的 "Fusion (A + B)" 显示名，
+  // 其次 sku 美化（去思考档/速度后缀）。非 fusion uid 返回 null。
+  const fusionNames = useCallback(
+    (uid) => {
+      const parts = splitFusionUid(uid);
+      if (!parts) return null;
+      const opts =
+        devinOpts.status === 'ok' && Array.isArray(devinOpts.config?.model?.options)
+          ? devinOpts.config.model.options
+          : [];
+      const hit = opts.find((o) => o.value === uid);
+      const nm = hit ? /^Fusion \((.*?) \+ (.*?)\)\s*$/.exec(String(hit.name || '')) : null;
+      return {
+        leadLabel: nm?.[1] || prettifyModelKey(parts.lead),
+        sideLabel: nm?.[2] || prettifyModelKey(parts.side),
+      };
+    },
+    [devinOpts],
+  );
+
   const sharedProps = {
     convId: conv?.id,
     pendings,
@@ -4123,6 +4770,7 @@ export default function App() {
     focusNoteId,
     focusBranchId,
     appearance,
+    fusionNames,
   };
 
   return (
@@ -4359,7 +5007,11 @@ export default function App() {
                 <TurnView {...sharedProps} key={t.id} turn={t} path={[]} />
               ))}
             {mainPendingHere && (
-              <PendingView pending={mainPending} onStop={() => onStop(mainPending.id)} />
+              <PendingView
+                pending={mainPending}
+                onStop={() => onStop(mainPending.id)}
+                fusionNames={fusionNames}
+              />
             )}
             <MarkRail marks={marks} transcriptRef={transcriptRef} onJump={jumpTo} />
           </div>
@@ -4395,31 +5047,40 @@ export default function App() {
             </div>
           )}
 
-          {showScrollDown && conv && (
-            <button
-              type="button"
-              className="scroll-bottom-btn"
-              aria-label="回到底部"
-              title="回到底部"
-              onClick={scrollToBottom}
-            >
-              ↓ 回到底部
-            </button>
-          )}
-
-          {perms.length > 0 && (
+          {(perms.length > 0 || elis.length > 0) && (
             <div className="perm-wrap">
-              <PermDialog
-                key={perms[0].requestId}
-                perm={perms[0]}
-                more={perms.length - 1}
-                onDecide={decidePerm}
-              />
+              {perms.length > 0 && (
+                <PermDialog
+                  key={perms[0].requestId}
+                  perm={perms[0]}
+                  more={perms.length - 1}
+                  onDecide={decidePerm}
+                />
+              )}
+              {elis.length > 0 && (
+                <ElicitDialog
+                  key={elis[0].requestId}
+                  eli={elis[0]}
+                  more={elis.length - 1}
+                  onDecide={decideEli}
+                />
+              )}
             </div>
           )}
 
           {conv && (
             <div className="composer-area">
+              {showScrollDown && (
+                <button
+                  type="button"
+                  className="scroll-bottom-btn"
+                  aria-label="回到底部"
+                  title="回到底部"
+                  onClick={scrollToBottom}
+                >
+                  ↓ 回到底部
+                </button>
+              )}
               <details className="composer-settings" key={`settings:${conv.id}`}>
                 <summary>
                   <span>对话设置</span>
@@ -4445,9 +5106,45 @@ export default function App() {
                       : '默认工作区';
                     const billable =
                       isBillableModel(modelVal) || isBillableSpeed(mc.speed || '');
+                    // 本对话回合在跑且（实时上报/所选）模型为 fusion 配对 →
+                    // 摘要里按当前 role 绿色高亮对应一侧；结束/非 fusion 回落原摘要。
+                    const liveFusion =
+                      settingsPending &&
+                      fusionNames(
+                        settingsPending.liveModel || settingsPending.modelAtSend || modelVal,
+                      );
+                    const activeRole = settingsPending?.role === 'sidekick' ? 'sidekick' : 'lead';
                     return (
-                      <span className={`settings-summary ${billable ? 'warn' : ''}`}>
-                        {modelLabel} · {permLabel} · {wsLabel}
+                      <span
+                        className={`settings-summary${billable ? ' warn' : ''}${liveFusion ? ' fusion-running' : ''}`}
+                      >
+                        {liveFusion ? (
+                          <>
+                            {'Fusion ('}
+                            <span
+                              className={
+                                activeRole === 'lead' ? 'fusion-model-active' : undefined
+                              }
+                            >
+                              {liveFusion.leadLabel}
+                            </span>
+                            {' + '}
+                            <span
+                              className={
+                                activeRole === 'sidekick' ? 'fusion-model-active' : undefined
+                              }
+                            >
+                              {liveFusion.sideLabel}
+                            </span>
+                            {')'}
+                          </>
+                        ) : (
+                          modelLabel
+                        )}
+                        {' · '}
+                        {permLabel}
+                        {' · '}
+                        {wsLabel}
                       </span>
                     );
                   })()}

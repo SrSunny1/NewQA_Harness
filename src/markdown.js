@@ -11,6 +11,12 @@ export const md = new MarkdownIt({
 
 md.use(mathjax3);
 
+const stripMathStyle = (html) => html.replace(/\s*<style>[\s\S]*?<\/style>\s*/g, ' ');
+for (const name of ['math_inline', 'math_block']) {
+  const base = md.renderer.rules[name];
+  if (base) md.renderer.rules[name] = (...args) => stripMathStyle(base(...args));
+}
+
 // file: 协议放行（markdown-it 默认按危险协议拒解析 → 显示原始 [x](file://%xx) 乱码）。
 // 渲染为非导航文件名片：浏览器本就禁止 http 页打开 file://，做成等宽 chip 更诚实。
 const _validateLink = md.validateLink.bind(md);

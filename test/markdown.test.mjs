@@ -18,8 +18,11 @@ test('普通 https 链接仍是 <a>，裸文本不受影响', () => {
   assert.match(h, /<a href="https:\/\/example\.com\/a">doc<\/a>/);
 });
 
-test('数学公式仍渲染为 mjx-container', () => {
-  assert.match(html('行内 $a_b$'), /mjx-container/);
+test('数学公式仍渲染为 mjx-container，且不注入随机内联 style', () => {
+  const h = html('行内 $a_b$');
+  assert.match(h, /mjx-container/);
+  assert.doesNotMatch(h, /<style[\s>]/);
+  assert.ok(h.length < 3000, '公式 HTML 不携带整份 MathJax 样式文本');
 });
 
 test('代码块外包 .code-wrap 且复制按钮无文本节点（不污染选区偏移）', () => {

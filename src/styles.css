@@ -25,6 +25,8 @@
   --sum-grad-b: #7c3aed;
   --sum-warn-a: #b45309;
   --sum-warn-b: #dc2626;
+  --fusion-active-a: #08633b;
+  --fusion-active-b: #0b795d;
 }
 :root[data-theme='dark'] {
   --bg: #161616;
@@ -45,6 +47,8 @@
   --sum-grad-b: #a78bfa;
   --sum-warn-a: #fbbf24;
   --sum-warn-b: #f87171;
+  --fusion-active-a: #a7f3a9;
+  --fusion-active-b: #38e6b9;
 }
 
 /* 标注色（深浅主题通用，半透明） */
@@ -664,21 +668,21 @@ body {
   background: #f9a8d4;
 }
 
-/* 支线五色（CodeSlice：每个顶层锚点树内 (round-1)%5，蓝/绿/琥珀/玫瑰/薰衣草）；
+/* 支线五色（CodeSlice：每个顶层锚点树内 (round-1)%5，玫瑰/绿/琥珀/蓝/薰衣草）；
    --tone-*-bg 面板底色、--tone-*-b 主色、--tone-*-ink 深色文字/徽标。 */
 :root {
-  --tone-0-bg: rgba(96, 165, 250, 0.2);
-  --tone-0-b: #60a5fa;
-  --tone-0-ink: #2563eb;
+  --tone-0-bg: rgba(251, 113, 133, 0.2);
+  --tone-0-b: #f43f5e;
+  --tone-0-ink: #e11d48;
   --tone-1-bg: rgba(74, 222, 128, 0.2);
   --tone-1-b: #4ade80;
   --tone-1-ink: #16a34a;
   --tone-2-bg: rgba(251, 191, 36, 0.22);
   --tone-2-b: #d97706;
   --tone-2-ink: #b45309;
-  --tone-3-bg: rgba(251, 113, 133, 0.2);
-  --tone-3-b: #f43f5e;
-  --tone-3-ink: #e11d48;
+  --tone-3-bg: rgba(96, 165, 250, 0.2);
+  --tone-3-b: #60a5fa;
+  --tone-3-ink: #2563eb;
   --tone-4-bg: rgba(167, 139, 250, 0.2);
   --tone-4-b: #a78bfa;
   --tone-4-ink: #7c3aed;
@@ -764,6 +768,138 @@ body {
   display: block;
   text-align: center;
 }
+.source-block span[id^='mjx-'] {
+  display: contents;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'] {
+  direction: ltr;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'] > svg {
+  overflow: visible;
+  min-height: 1px;
+  min-width: 1px;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'] > svg a {
+  fill: blue;
+  stroke: blue;
+}
+.source-block span[id^='mjx-'] mjx-assistive-mml {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  clip: rect(1px, 1px, 1px, 1px);
+  padding: 1px 0 0 0 !important;
+  border: 0 !important;
+  display: block !important;
+  width: auto !important;
+  overflow: hidden !important;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -khtml-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+.source-block span[id^='mjx-'] mjx-assistive-mml[display='block'] {
+  width: 100% !important;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'][display='true'] {
+  display: block;
+  text-align: center;
+  margin: 1em 0;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'][display='true'][width='full'] {
+  display: flex;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'][justify='left'] {
+  text-align: left;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'][justify='right'] {
+  text-align: right;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='merror'] > g {
+  fill: red;
+  stroke: red;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='merror'] > rect[data-background] {
+  fill: yellow;
+  stroke: none;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='mtable'] > line[data-line],
+.source-block span[id^='mjx-'] svg[data-table] > g > line[data-line] {
+  stroke-width: 70px;
+  fill: none;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='mtable'] > rect[data-frame],
+.source-block span[id^='mjx-'] svg[data-table] > g > rect[data-frame] {
+  stroke-width: 70px;
+  fill: none;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='mtable'] > .mjx-dashed,
+.source-block span[id^='mjx-'] svg[data-table] > g > .mjx-dashed {
+  stroke-dasharray: 140;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='mtable'] > .mjx-dotted,
+.source-block span[id^='mjx-'] svg[data-table] > g > .mjx-dotted {
+  stroke-linecap: round;
+  stroke-dasharray: 0, 140;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='mtable'] > g > svg {
+  overflow: visible;
+}
+.source-block span[id^='mjx-'] [jax='SVG'] mjx-tool {
+  display: inline-block;
+  position: relative;
+  width: 0;
+  height: 0;
+}
+.source-block span[id^='mjx-'] [jax='SVG'] mjx-tool > mjx-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.source-block span[id^='mjx-'] mjx-tool > mjx-tip {
+  display: inline-block;
+  padding: 0.2em;
+  border: 1px solid #888;
+  font-size: 70%;
+  background-color: #f8f8f8;
+  color: black;
+  box-shadow: 2px 2px 5px #aaaaaa;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='maction'][data-toggle] {
+  cursor: pointer;
+}
+.source-block span[id^='mjx-'] mjx-status {
+  display: block;
+  position: fixed;
+  left: 1em;
+  bottom: 1em;
+  min-width: 25%;
+  padding: 0.2em 0.4em;
+  border: 1px solid #888;
+  font-size: 90%;
+  background-color: #f8f8f8;
+  color: black;
+}
+.source-block span[id^='mjx-'] foreignObject[data-mjx-xml] {
+  font-family: initial;
+  line-height: normal;
+  overflow: visible;
+}
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'] path[data-c],
+.source-block span[id^='mjx-'] mjx-container[jax='SVG'] use[data-c] {
+  stroke-width: 3;
+}
+.source-block span[id^='mjx-'] g[data-mml-node='xypic'] path,
+.source-block span[id^='mjx-'] .MathJax g[data-mml-node='xypic'] path {
+  stroke-width: inherit;
+}
+.source-block span[id^='mjx-'] mjx-assistive-mml {
+  user-select: text !important;
+  clip: auto !important;
+  color: rgba(0, 0, 0, 0);
+}
 
 /* CSS Custom Highlight API */
 ::highlight(nq-n-yellow) {
@@ -842,8 +978,23 @@ body {
   content: '';
   animation: dots 1.2s steps(4) infinite;
 }
-.btn-stop {
+.turn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
   margin-top: 8px;
+}
+.turn-duration {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.turn-duration-final {
+  display: block;
+  margin-top: 8px;
+}
+.btn-stop {
   border: 1px solid var(--danger);
   color: var(--danger);
   background: transparent;
@@ -1045,8 +1196,110 @@ body {
   color: var(--ink-soft);
 }
 
+/* ---------- elicitation 提问表单 ---------- */
+.elicit-field {
+  margin: 10px 0 2px;
+}
+.elicit-field-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.elicit-req {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.elicit-field-desc {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 2px 0;
+}
+.elicit-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.elicit-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.elicit-option input[type='radio'],
+.elicit-option input[type='checkbox'] {
+  margin-top: 3px;
+  accent-color: var(--accent, #2563eb);
+}
+.elicit-option small {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.elicit-other-input,
+.elicit-text-input {
+  margin-top: 4px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 12.5px;
+  padding: 5px 8px;
+}
+.elicit-options .elicit-other-input {
+  width: auto;
+  min-width: 180px;
+  margin-top: 2px;
+  margin-left: 4px;
+}
+
+/* ---------- fusion lead/sidekick 实时指示 ---------- */
+.fusion-live {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0 2px;
+  font-size: 11.5px;
+}
+.fusion-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: var(--ink-soft);
+  background: var(--panel);
+  transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.fusion-pill.active {
+  border-color: var(--fusion-active-a);
+  color: var(--ink);
+  font-weight: 600;
+}
+.fusion-model-active {
+  display: inline-block;
+  max-width: 100%;
+  font-weight: 700;
+  color: var(--fusion-active-a);
+}
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  .fusion-model-active {
+    background-image: linear-gradient(92deg, var(--fusion-active-a), var(--fusion-active-b));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
 /* ---------- 输入区 ---------- */
 .composer-area {
+  position: relative;
   border-top: 1px solid var(--line);
   background: var(--bg);
 }
@@ -2482,6 +2735,14 @@ body {
 .settings-summary.warn {
   background-image: linear-gradient(92deg, var(--sum-warn-a), var(--sum-warn-b));
 }
+.settings-summary.fusion-running {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: right;
+  background-image: none;
+  color: var(--ink-soft);
+}
 
 /* ---------- 代码块复制按钮（零文本节点，不干扰选区偏移） ---------- */
 .code-wrap {
@@ -2526,7 +2787,7 @@ body {
 .scroll-bottom-btn {
   position: absolute;
   right: 24px;
-  bottom: 118px;
+  bottom: calc(100% + 10px);
   z-index: 15;
   border: 1px solid var(--line);
   background: var(--panel);

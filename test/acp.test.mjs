@@ -7,6 +7,7 @@ import {
   makePrompt,
   probeOptions,
   AcpError,
+  AcpSessionLoadError,
   DISCUSSION_MODEL,
 } from '../server/acp.mjs';
 import { fakeSpawn, agentScript, workScript, probeScript } from './helpers.mjs';
@@ -342,7 +343,7 @@ test('work + sessionId：session/load 原生续聊，空历史直发、支线记
   assert.equal(res2.sessionId, 'old-session');
 });
 
-test('work：session/load 失败 → 可见错误，不偷换新会话', async () => {
+test('work：session/load RPC 拒绝 → AcpSessionLoadError，不偷换新会话/不发 prompt', async () => {
   const spawn = fakeSpawn(workScript({ loadError: true }));
   let child;
   await assert.rejects(
@@ -353,9 +354,57 @@ test('work：session/load 失败 → 可见错误，不偷换新会话', async (
         sessionId: 'gone-session',
         spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
       }),
-    (e) => e instanceof AcpError && /无法恢复/.test(e.message),
+    (e) =>
+      e instanceof AcpSessionLoadError &&
+      /无法恢复/.test(e.message) &&
+      /重试时将使用当前对话的记录继续/.test(e.message),
   );
+  assert.ok(!child.calls.includes('session/new'), '不暗开新会话顶替');
   assert.ok(!child.calls.includes('session/prompt'), '失败后不发 prompt');
+});
+
+test('work：session/load 非 RPC 失败（进程退出/超时）→ 普通 AcpError，保留会话语义', async () => {
+  // 进程在 load 期间退出：fatal 直接收口，不是「会话失效」，不带重试降级语义
+  const exitSpawn = fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/load') {
+      api.exit(2);
+    }
+  });
+  await assert.rejects(
+    () =>
+      runTurn({
+        ...BASE,
+        kind: 'work',
+        sessionId: 'gone-session',
+        spawnImpl: exitSpawn,
+      }),
+    (e) =>
+      e instanceof AcpError &&
+      !(e instanceof AcpSessionLoadError) &&
+      /进程异常退出/.test(e.message),
+  );
+  // load 超时走 catch：包装为「暂时无法加载」，同样区分于 RPC 拒绝
+  const hangSpawn = fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    }
+  });
+  await assert.rejects(
+    () =>
+      runTurn({
+        ...BASE,
+        kind: 'work',
+        sessionId: 'gone-session',
+        spawnImpl: hangSpawn,
+        timeouts: { request: 60 },
+      }),
+    (e) =>
+      e instanceof AcpError &&
+      !(e instanceof AcpSessionLoadError) &&
+      /暂时无法加载/.test(e.message),
+  );
 });
 
 test('work：set_mode 失败 → fail closed', async () => {
@@ -1104,4 +1153,427 @@ test('probeOptions：spawn 失败 / initialize 不兼容 → AcpError', async ()
       }),
     (e) => e instanceof AcpError && /未找到 devin 命令/.test(e.message),
   );
+});
+
+// ---------- elicitation（agent 提问） ----------
+
+import { normalizeElicitation, sanitizeElicitationContent } from '../server/acp.mjs';
+
+test('normalizeElicitation：select/multi/text 三种字段 + allowOther + 有界', () => {
+  const info = normalizeElicitation({
+    mode: 'form',
+    message: '哪个颜色？',
+    requestedSchema: {
+      type: 'object',
+      required: ['q0'],
+      properties: {
+        q0: {
+          type: 'string',
+          title: 'Color',
+          description: 'Which color?',
+          oneOf: [
+            { const: 'red', title: '红色', _meta: { 'cognition.ai/description': 'Prefer red' } },
+            { const: 'blue', title: '蓝色' },
+          ],
+        },
+        q1: {
+          type: 'array',
+          title: 'Tags',
+          items: { oneOf: [{ const: 'a', title: 'A' }, { const: 'b', title: 'B' }] },
+        },
+        q2: { type: 'string', title: '备注' },
+      },
+    },
+    _meta: { 'cognition.ai/allowOther': true, 'cognition.ai/toolCallId': 'call_x' },
+  });
+  assert.equal(info.message, '哪个颜色？');
+  assert.equal(info.allowOther, true);
+  assert.equal(info.toolCallId, 'call_x');
+  const [f0, f1, f2] = info.fields;
+  assert.equal(f0.kind, 'select');
+  assert.equal(f0.required, true);
+  assert.deepEqual(f0.options[0], { value: 'red', label: '红色', description: 'Prefer red' });
+  assert.equal(f1.kind, 'multi');
+  assert.equal(f1.options.length, 2);
+  assert.equal(f2.kind, 'text');
+  // 缺 schema/字段为空 → null
+  assert.equal(normalizeElicitation({}), null);
+  assert.equal(normalizeElicitation({ requestedSchema: { properties: {} } }), null);
+});
+
+test('sanitizeElicitationContent：只留 schema 键，multi 滤非字符串', () => {
+  const info = normalizeElicitation({
+    message: 'm',
+    requestedSchema: {
+      type: 'object',
+      properties: {
+        q0: { type: 'string', oneOf: [{ const: 'red' }] },
+        q1: { type: 'array', items: { enum: ['a', 'b'] } },
+      },
+    },
+  });
+  const out = sanitizeElicitationContent(info, {
+    q0: 'red',
+    q1: ['a', 42, 'b'],
+    evil: 'x'.repeat(9000),
+  });
+  assert.deepEqual(out, { q0: 'red', q1: ['a', 'b'] });
+  assert.equal(out.evil, undefined);
+});
+
+test('elicitation：work 模式转交 onElicitation，accept 应答回传 schema 内内容', async () => {
+  let captured = null;
+  const spawn = fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, { sessionId: 'fake-session' });
+    } else if (msg.method === 'session/set_mode') {
+      api.respond(msg.id, {});
+    } else if (msg.method === 'session/prompt') {
+      captured = api.request('elicitation/create', {
+        mode: 'form',
+        sessionId: 'fake-session',
+        message: 'Which color?',
+        requestedSchema: {
+          type: 'object',
+          required: ['q0'],
+          properties: {
+            q0: {
+              type: 'string',
+              title: 'Color',
+              oneOf: [{ const: 'red', title: 'red' }, { const: 'blue', title: 'blue' }],
+            },
+          },
+        },
+        _meta: { 'cognition.ai/allowOther': true },
+      });
+      setTimeout(() => {
+        api.notify('session/update', {
+          sessionId: 'fake-session',
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '完' } },
+        });
+        api.respond(msg.id, { stopReason: 'end_turn' });
+      }, 30);
+    }
+  });
+  let child;
+  const wrapped = (c, a, o) => (child = spawn(c, a, o));
+  const infos = [];
+  const res = await runTurn({
+    ...BASE,
+    kind: 'work',
+    spawnImpl: wrapped,
+    onElicitation: (info) => {
+      infos.push(info);
+      return Promise.resolve({ action: 'accept', content: { q0: 'blue', evil: 'x' } });
+    },
+  });
+  assert.equal(res.text, '完');
+  assert.equal(infos.length, 1);
+  assert.equal(infos[0].message, 'Which color?');
+  assert.equal(infos[0].fields[0].kind, 'select');
+  assert.equal(infos[0].allowOther, true);
+  const reply = child.responses.get(captured);
+  assert.deepEqual(reply.result, { action: 'accept', content: { q0: 'blue' } });
+});
+
+test('elicitation：无 hook（discussion）一律 cancel；work 无 hook 也 cancel', async () => {
+  for (const kind of ['discussion', 'work']) {
+    let captured = null;
+    const spawn = fakeSpawn((msg, api) => {
+      if (msg.method === 'initialize') {
+        api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+      } else if (msg.method === 'session/new') {
+        api.respond(msg.id, { sessionId: 'fake-session' });
+      } else if (msg.method === 'session/set_mode') {
+        api.respond(msg.id, {});
+      } else if (msg.method === 'session/prompt') {
+        captured = api.request('elicitation/create', {
+          mode: 'form',
+          message: 'q?',
+          requestedSchema: {
+            type: 'object',
+            properties: { q0: { type: 'string', oneOf: [{ const: 'a' }] } },
+          },
+        });
+        setTimeout(() => {
+          api.notify('session/update', {
+            sessionId: 'fake-session',
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '完' } },
+          });
+          api.respond(msg.id, { stopReason: 'end_turn' });
+        }, 30);
+      }
+    });
+    let child;
+    await runTurn({ ...BASE, kind, spawnImpl: (c, a, o) => (child = spawn(c, a, o)) });
+    const reply = child.responses.get(captured);
+    assert.deepEqual(reply.result, { action: 'cancel' }, `${kind} 无 hook 应 cancel`);
+  }
+});
+
+test('elicitation：work+hook 才声明能力；discussion 与无 hook 不声明', async () => {
+  for (const [kind, hook, expectCap] of [
+    ['work', true, true],
+    ['work', false, false],
+    ['discussion', true, false],
+  ]) {
+    const spawn = fakeSpawn(workScript({}));
+    let child;
+    await runTurn({
+      ...BASE,
+      kind,
+      spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+      ...(hook ? { onElicitation: () => Promise.resolve(null) } : {}),
+    });
+    const init = child.msgs.find((m) => m.method === 'initialize');
+    const cap = init.params.clientCapabilities?.elicitation?.form;
+    assert.equal(!!cap, expectCap, `kind=${kind} hook=${hook} 能力声明应为 ${expectCap}`);
+  }
+});
+
+test('elicitation：回合 abort 时未答提问收到 cancel', async () => {
+  let captured = null;
+  const spawn = fakeSpawn((msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, { sessionId: 'fake-session' });
+    } else if (msg.method === 'session/set_mode') {
+      api.respond(msg.id, {});
+    } else if (msg.method === 'session/prompt') {
+      captured = api.request('elicitation/create', {
+        mode: 'form',
+        message: 'q?',
+        requestedSchema: {
+          type: 'object',
+          properties: { q0: { type: 'string', oneOf: [{ const: 'a' }] } },
+        },
+      });
+      // 永不结束回合：等 client abort
+    }
+  });
+  let child;
+  const controller = new AbortController();
+  const p = runTurn({
+    ...BASE,
+    kind: 'work',
+    spawnImpl: (c, a, o) => (child = spawn(c, a, o)),
+    signal: controller.signal,
+    onElicitation: () => new Promise(() => {}), // 用户始终不答
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  controller.abort();
+  await assert.rejects(p);
+  const reply = child.responses.get(captured);
+  assert.deepEqual(reply.result, { action: 'cancel' });
+});
+
+// ---------- fusion 角色指示 ----------
+
+test('fusion：run_subagent 工具事件触发 sidekick 角色，普通工具回 lead', async () => {
+  const spawn = fakeSpawn(
+    workScript({
+      newConfigOptions: [
+        { id: 'model', currentValue: 'fusion-opus-sidekick-swe-2-medium', options: [] },
+      ],
+      notifyDuringPrompt: (msg, api) => {
+        const sid = msg.params.sessionId;
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            title: 'Ran explore subagent x',
+            rawInput: { profile: 'subagent_explore' },
+            _meta: { 'cognition.ai/inferenceToolName': 'run_subagent' },
+          },
+        });
+      },
+    }),
+  );
+  const roles = [];
+  await runTurn({
+    ...BASE,
+    kind: 'work',
+    spawnImpl: spawn,
+    onRole: (r) => roles.push(r),
+  });
+  assert.deepEqual(roles, ['sidekick', 'lead'], '委派时切 sidekick，lead 继续流式后切回');
+});
+
+test('fusion：非 fusion 模型不上报角色；_meta sidekick 标记优先', async () => {
+  // 非 fusion：无任何 role 事件
+  const spawn1 = fakeSpawn(
+    workScript({
+      newConfigOptions: [{ id: 'model', currentValue: 'swe-2-1-medium', options: [] }],
+      notifyDuringPrompt: (msg, api) => {
+        api.notify('session/update', {
+          sessionId: msg.params.sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            rawInput: { profile: 'subagent_explore' },
+            _meta: { 'cognition.ai/inferenceToolName': 'run_subagent' },
+          },
+        });
+      },
+    }),
+  );
+  const roles1 = [];
+  await runTurn({ ...BASE, kind: 'work', spawnImpl: spawn1, onRole: (r) => roles1.push(r) });
+  assert.deepEqual(roles1, []);
+  // fusion + _meta 显式 sidekick：chunk 也算 sidekick
+  const spawn2 = fakeSpawn(
+    workScript({
+      chunks: [],
+      newConfigOptions: [
+        { id: 'model', currentValue: 'fusion-opus-sidekick-swe-2-medium', options: [] },
+      ],
+      notifyDuringPrompt: (msg, api) => {
+        api.notify('session/update', {
+          sessionId: msg.params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'side 产出' },
+            _meta: { 'cognition.ai/sidekick': true },
+          },
+        });
+      },
+    }),
+  );
+  const roles2 = [];
+  const res = await runTurn({ ...BASE, kind: 'work', spawnImpl: spawn2, onRole: (r) => roles2.push(r) });
+  assert.deepEqual(roles2, ['sidekick']);
+  assert.equal(res.text, 'side 产出');
+});
+
+test('fusion：思考与稀疏工具进度保留正确角色', async () => {
+  const spawn = fakeSpawn(
+    workScript({
+      newConfigOptions: [
+        { id: 'model', currentValue: 'fusion-opus-sidekick-swe-2-medium', options: [] },
+      ],
+      notifyDuringPrompt: (msg, api) => {
+        const sid = msg.params.sessionId;
+        // sidekick 委派工具（inferenceToolName 标记）
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'sk-1',
+            title: 'Ran explore subagent',
+            status: 'in_progress',
+            _meta: { 'cognition.ai/inferenceToolName': 'run_subagent' },
+          },
+        });
+        // sidekick 思考：envelope 层级 _meta（思考文本不得进入回答）
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: 'SK-THOUGHT-ENVELOPE' },
+            _meta: { 'cognition.ai/sidekick': true },
+          },
+        });
+        // sidekick 思考：content 层级 _meta
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: {
+              type: 'text',
+              text: 'SK-THOUGHT-CONTENT',
+              _meta: { 'cognition.ai/sidekick': true },
+            },
+          },
+        });
+        // 已知 sidekick 工具的稀疏进度（无任何标记）→ 仍按 sidekick 计
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'sk-1',
+            status: 'completed',
+          },
+        });
+        // 显式 lead 思考（sidekick:false）→ 切回 lead
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: 'LEAD-THOUGHT' },
+            _meta: { 'cognition.ai/sidekick': false },
+          },
+        });
+        // 显式 lead 标记的委派工具（sidekick:false + inferenceToolName）：
+        // 显式标记优先，记为 lead；其稀疏进度不得被历史委派状态复活成
+        // sidekick。
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'ld-1',
+            title: 'Ran explore subagent',
+            status: 'in_progress',
+            _meta: {
+              'cognition.ai/sidekick': false,
+              'cognition.ai/inferenceToolName': 'run_subagent',
+            },
+          },
+        });
+        api.notify('session/update', {
+          sessionId: sid,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'ld-1',
+            status: 'completed',
+          },
+        });
+      },
+    }),
+  );
+  const roles = [];
+  const roleAtTool = []; // 每次 onTool 时的当前角色快照
+  const res = await runTurn({
+    ...BASE,
+    kind: 'work',
+    spawnImpl: spawn,
+    onRole: (r) => roles.push(r),
+    onTool: () => roleAtTool.push(roles.at(-1) || 'lead'),
+  });
+  // 委派工具→sidekick；两处思考/稀疏进度不产生重复切换；lead 思考→lead；
+  // 显式 lead 的委派工具及其稀疏更新都不得再冒 sidekick；结尾默认 chunk
+  // （'答'）无标记，沿用 lead 不再上报。
+  assert.deepEqual(roles, ['sidekick', 'lead']);
+  assert.deepEqual(
+    roleAtTool,
+    ['sidekick', 'sidekick', 'lead', 'lead'],
+    '已知工具的稀疏进度沿用既有角色，显式 lead 不被委派标记复活',
+  );
+  assert.equal(res.text, '答');
+  assert.ok(!res.text.includes('THOUGHT'), '思考文本不得进入回答');
+});
+
+test('onModel：配置下发后、prompt 前上报实际模型', async () => {
+  const order = [];
+  const spawn = fakeSpawn(
+    workScript({
+      newConfigOptions: [{ id: 'model', currentValue: 'fusion-x-sidekick-y', options: [] }],
+      onPrompt: () => order.push('prompt'),
+    }),
+  );
+  const models = [];
+  await runTurn({
+    ...BASE,
+    kind: 'work',
+    spawnImpl: spawn,
+    onModel: (m) => {
+      models.push(m);
+      order.push('model');
+    },
+  });
+  assert.deepEqual(models, ['fusion-x-sidekick-y']);
+  assert.deepEqual(order, ['model', 'prompt'], 'model 事件必须先于 prompt');
 });

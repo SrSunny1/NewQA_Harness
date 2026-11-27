@@ -7,7 +7,14 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runTurn, probeOptions, AcpError, KINDS, MODEL_CONFIG_KEYS } from './acp.mjs';
+import {
+  runTurn,
+  probeOptions,
+  AcpError,
+  AcpSessionLoadError,
+  KINDS,
+  MODEL_CONFIG_KEYS,
+} from './acp.mjs';
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(SERVER_DIR, '..');
@@ -151,6 +158,7 @@ export function validateChatBody(body) {
     workspace = '',
     sessionId = null,
     convId = '',
+    turnId = '',
     kind = 'discussion',
     permissionMode = 'accept-edits',
     modelConfig = null,
@@ -221,6 +229,9 @@ export function validateChatBody(body) {
   if (typeof convId !== 'string' || !/^[\w-]{0,80}$/.test(convId)) {
     return { error: 'convId 格式不正确' };
   }
+  if (typeof turnId !== 'string' || !/^[\w-]{0,80}$/.test(turnId)) {
+    return { error: 'turnId 格式不正确' };
+  }
   // 贴图附件：≤4 张，mime 白名单，base64 有界
   if (!Array.isArray(images) || images.length > MAX_IMAGES) {
     return { error: `images 最多 ${MAX_IMAGES} 张` };
@@ -234,7 +245,7 @@ export function validateChatBody(body) {
       return { error: '单张图片超过大小上限' };
     }
   }
-  return { history, question, quote, workspace, sessionId, convId, kind, permissionMode, modelConfig: mc, images };
+  return { history, question, quote, workspace, sessionId, convId, turnId, kind, permissionMode, modelConfig: mc, images };
 }
 
 // workspace：'' → 服务默认目录；否则解析为真实存在的目录（不回退、不改全局 cwd）。
@@ -384,13 +395,15 @@ export function createServer({
       'Content-Type': 'application/x-ndjson; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Accel-Buffering': 'no',
+      'X-NewQA-Turn-Started-At': String(rec.startedAt),
     });
     // 立即发头：agent 可能长时间无输出，客户端应先拿到 200 再等流
     res.flushHeaders();
     for (const ev of rec.events) {
       // 已解决（或回合已结束）的权限请求不重放——否则刷新后
-      // 客户端会复活一个永远无法作答的权限弹窗
+      // 客户端会复活一个永远无法作答的权限弹窗；elicitation 提问同理
       if (ev.type === 'permission' && !pendingPerms.has(ev.requestId)) continue;
+      if (ev.type === 'elicitation' && !pendingElis.has(ev.requestId)) continue;
       try {
         res.write(JSON.stringify(ev) + '\n');
       } catch {}
@@ -411,6 +424,9 @@ export function createServer({
   // 各并发回合的权限决策：requestId → {resolve, options}。无自动批准；
   // 回合结束只清理自己发出的那批（requestId 为 UUID，跨回合不冲突）。
   const pendingPerms = new Map();
+  // agent 提问（elicitation）决策：requestId → {resolve}。语义同权限：
+  // 回合结束/无人作答 → resolve(null) → agent 收到 cancel。
+  const pendingElis = new Map();
 
   async function handleChat(req, res) {
     if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
@@ -433,11 +449,14 @@ export function createServer({
     }
     const rec = {
       convId: v.convId,
+      // 回合唯一标识：attach/stop 据此绑定精确回合，旧请求不携带即免验
+      turnId: v.turnId,
       events: [],
       listeners: new Set(),
       state: 'running',
       controller: new AbortController(),
       myPerms: new Set(),
+      myElis: new Set(),
       stopped: false,
       startedAt: Date.now(),
     };
@@ -451,6 +470,18 @@ export function createServer({
             return new Promise((resolve) => {
               pendingPerms.set(info.requestId, { resolve, options: info.options });
               rec.myPerms.add(info.requestId);
+            });
+          }
+        : null;
+    // 本回合的 elicitation 提问：事件进回放缓冲（刷新重挂可复活表单），
+    // 决策经 /api/chat/elicitation 返回；回合结束未答 → cancel。
+    const onElicitation =
+      v.kind === 'work'
+        ? (info) => {
+            broadcast(rec, { type: 'elicitation', ...info });
+            return new Promise((resolve) => {
+              pendingElis.set(info.requestId, { resolve });
+              rec.myElis.add(info.requestId);
             });
           }
         : null;
@@ -470,6 +501,10 @@ export function createServer({
         onDelta: (text) => broadcast(rec, { type: 'delta', text }),
         onTool: v.kind === 'work' ? (tool) => broadcast(rec, { type: 'tool', tool }) : null,
         onPermission,
+        onElicitation,
+        // fusion 角色/实际模型透传：客户端指示器与提前展示用
+        onRole: v.kind === 'work' ? (role) => broadcast(rec, { type: 'role', role }) : null,
+        onModel: v.kind === 'work' ? (model) => broadcast(rec, { type: 'model', model }) : null,
       });
       if (v.kind === 'work') {
         // 只读证据：work 回合成功后的 git 快照（有超时上限，不阻塞回合）。
@@ -494,6 +529,7 @@ export function createServer({
       broadcast(rec, {
         type: 'done',
         sessionId: result.sessionId,
+        durationMs: Math.max(0, Date.now() - rec.startedAt),
         ...(result.model ? { model: result.model } : {}),
       });
     } catch (e) {
@@ -504,12 +540,18 @@ export function createServer({
         broadcast(rec, {
           type: 'error',
           message: e instanceof AcpError ? e.message : '服务内部错误，请重试',
+          // 原生会话失效：客户端可清掉存的 sessionId，用本地记录重试
+          ...(e instanceof AcpSessionLoadError ? { code: 'session_load_failed' } : {}),
         });
       }
     } finally {
       for (const id of rec.myPerms) {
         pendingPerms.get(id)?.resolve(null);
         pendingPerms.delete(id);
+      }
+      for (const id of rec.myElis) {
+        pendingElis.get(id)?.resolve(null);
+        pendingElis.delete(id);
       }
       rec.state = rec.stopped ? 'stopped' : rec.events.some((ev) => ev.type === 'done') ? 'done' : 'error';
       for (const r of rec.listeners) {
@@ -543,8 +585,15 @@ export function createServer({
     if (typeof convId !== 'string' || !convId || convId.length > 128) {
       return json(res, 400, { error: 'convId 缺失或格式不正确' });
     }
+    const turnId = body?.turnId ?? '';
+    if (typeof turnId !== 'string' || !/^[\w-]{0,80}$/.test(turnId)) {
+      return json(res, 400, { error: 'turnId 格式不正确' });
+    }
     const rec = activeTurns.get(convId);
-    if (!rec) return json(res, 404, { error: '该对话没有进行中或可回放的回合' });
+    // 带 turnId 时必须精确命中同一回合；不带（旧客户端/旧存档）回退 convId 匹配
+    if (!rec || (turnId && rec.turnId !== turnId)) {
+      return json(res, 404, { error: '该对话没有进行中或可回放的回合' });
+    }
     attachRes(rec, res);
   }
 
@@ -565,8 +614,13 @@ export function createServer({
     if (typeof convId !== 'string' || !convId || convId.length > 128) {
       return json(res, 400, { error: 'convId 缺失或格式不正确' });
     }
+    const turnId = body?.turnId ?? '';
+    if (typeof turnId !== 'string' || !/^[\w-]{0,80}$/.test(turnId)) {
+      return json(res, 400, { error: 'turnId 格式不正确' });
+    }
     const rec = activeTurns.get(convId);
-    if (!rec || rec.state !== 'running') {
+    // 带 turnId 时必须精确命中同一回合——避免误停同对话的后起回合
+    if (!rec || rec.state !== 'running' || (turnId && rec.turnId !== turnId)) {
       return json(res, 404, { error: '该对话没有进行中的回合' });
     }
     rec.stopped = true;
@@ -600,6 +654,44 @@ export function createServer({
     }
     pendingPerms.delete(requestId);
     entry.resolve(optionId);
+    return json(res, 200, { ok: true });
+  }
+
+  // elicitation 作答：{requestId, action: accept|decline|cancel, content?}。
+  // content 只做通用有界清洗（对象/键数/字符串长度），按 schema 的精确
+  // 清洗在 acp 层（sanitizeElicitationContent）再做一次。
+  async function handleElicitationDecision(req, res) {
+    if (req.method !== 'POST') return json(res, 405, { error: '仅支持 POST' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (!ct.startsWith('application/json')) {
+      return json(res, 415, { error: '仅接受 JSON 请求体' });
+    }
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return json(res, e.statusCode || 400, { error: e.message || '请求体无效' });
+    }
+    const { requestId, action, content } = body || {};
+    if (typeof requestId !== 'string' || !requestId) {
+      return json(res, 400, { error: 'requestId 缺失' });
+    }
+    const entry = pendingElis.get(requestId);
+    if (!entry) return json(res, 404, { error: '该提问已失效或不存在' });
+    const act = action === 'accept' ? 'accept' : action === 'decline' ? 'decline' : 'cancel';
+    const clean = {};
+    if (act === 'accept' && content && typeof content === 'object' && !Array.isArray(content)) {
+      for (const [k, v] of Object.entries(content).slice(0, 8)) {
+        const key = String(k).slice(0, 40);
+        if (!key) continue;
+        if (typeof v === 'string') clean[key] = v.slice(0, 2000);
+        else if (Array.isArray(v)) {
+          clean[key] = v.filter((x) => typeof x === 'string').slice(0, 24).map((x) => x.slice(0, 2000));
+        }
+      }
+    }
+    pendingElis.delete(requestId);
+    entry.resolve(act === 'accept' ? { action: act, content: clean } : { action: act });
     return json(res, 200, { ok: true });
   }
 
@@ -811,6 +903,7 @@ export function createServer({
       if (pathname === '/api/chat/attach') return await handleChatAttach(req, res);
       if (pathname === '/api/chat/stop') return await handleChatStop(req, res);
       if (pathname === '/api/chat/permission') return await handlePermissionDecision(req, res);
+      if (pathname === '/api/chat/elicitation') return await handleElicitationDecision(req, res);
       if (pathname === '/api/workspace/inspect') return await handleInspect(req, res);
       if (pathname === '/api/workspace/browse') return await handleBrowse(req, res);
       if (pathname === '/api/workspace/mkdir') return await handleMkdir(req, res);

@@ -219,7 +219,7 @@ function controlledSpawn(releaseRef) {
   });
 }
 
-test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () => {
+test('断连不杀回合：attach 重放缓冲并追 live 至 done；turnId 精确绑定', async () => {
   const releaseRef = { current: null };
   await withServer(
     async (base) => {
@@ -227,7 +227,7 @@ test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () =>
       const res1 = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...VALID, convId: 'cv1' }),
+        body: JSON.stringify({ ...VALID, convId: 'cv1', turnId: 't-cv1' }),
         signal: c1.signal,
       });
       assert.equal(res1.status, 200);
@@ -235,9 +235,33 @@ test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () =>
       c1.abort(); // 模拟刷新断连——不应杀回合
       res1.body?.cancel().catch(() => {});
       await new Promise((r) => setTimeout(r, 40));
+      // turnId 不匹配 → 404，不误挂别人/别的回合
+      assert.equal(
+        (await postJson(`${base}/api/chat/attach`, { convId: 'cv1', turnId: 'wrong' }))
+          .status,
+        404,
+      );
+      // turnId 形状非法 → 400
+      assert.equal(
+        (await postJson(`${base}/api/chat/attach`, { convId: 'cv1', turnId: 'bad id' }))
+          .status,
+        400,
+      );
+      // 旧客户端不带 turnId → 按 convId 回退匹配
+      const resLegacy = await postJson(`${base}/api/chat/attach`, { convId: 'cv1' });
+      assert.equal(resLegacy.status, 200);
       // attach：回合应仍在跑，先重放「前半」
-      const res2 = await postJson(`${base}/api/chat/attach`, { convId: 'cv1' });
+      const res2 = await postJson(`${base}/api/chat/attach`, {
+        convId: 'cv1',
+        turnId: 't-cv1',
+      });
       assert.equal(res2.status, 200);
+      // stop 带错 turnId → 404，不中止仍在跑的回合
+      assert.equal(
+        (await postJson(`${base}/api/chat/stop`, { convId: 'cv1', turnId: 'other' }))
+          .status,
+        404,
+      );
       await new Promise((r) => setTimeout(r, 40));
       releaseRef.current?.(); // 后半 + 完成，应经 live 流到达
       const text = await res2.text();
@@ -245,6 +269,10 @@ test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () =>
       assert.match(text, /后半/);
       assert.match(text, /"type":"done"/);
       assert.doesNotMatch(text, /"type":"error"/);
+      // 不带 turnId 的兼容 attach 也追到了完整流
+      const legacyText = await resLegacy.text();
+      assert.match(legacyText, /后半/);
+      assert.match(legacyText, /"type":"done"/);
     },
     { spawnImpl: controlledSpawn(releaseRef) },
   );
@@ -253,12 +281,15 @@ test('断连不杀回合：attach 重放缓冲并追 live 至 done', async () =>
 test('attach 已完结回合：重放终态事件后流结束；未知 convId → 404', async () => {
   await withServer(async (base) => {
     const res1 = await post(base, { ...VALID, convId: 'cv2' });
-    assert.equal((await res1.text()).includes('"type":"done"'), true);
+    const start = Number(res1.headers.get('X-NewQA-Turn-Started-At'));
+    assert.ok(Number.isSafeInteger(start) && start > 0);
+    const done = (await readEvents(res1)).find((ev) => ev.type === 'done');
+    assert.ok(Number.isSafeInteger(done?.durationMs) && done.durationMs >= 0);
     // 回合已 done 但回放缓冲仍在 TTL 内：attach 重放后 end
     const res2 = await postJson(`${base}/api/chat/attach`, { convId: 'cv2' });
     assert.equal(res2.status, 200);
-    const text = await res2.text();
-    assert.match(text, /"type":"done"/);
+    assert.equal(Number(res2.headers.get('X-NewQA-Turn-Started-At')), start);
+    assert.deepEqual((await readEvents(res2)).find((ev) => ev.type === 'done'), done);
     // 未知 convId
     assert.equal((await postJson(`${base}/api/chat/attach`, { convId: 'nope' })).status, 404);
     assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'nope' })).status, 404);
@@ -277,7 +308,7 @@ test('attach 已完结回合：重放终态事件后流结束；未知 convId �
   });
 });
 
-test('stop 端点中止回合 → 广播 stopped 收尾；重复 stop → 404', async () => {
+test('stop 端点中止回合 → 广播 stopped 收尾；turnId 不匹配/重复 stop → 404', async () => {
   // 假 agent 永不响应 prompt
   const hanging = fakeSpawn((msg, api) => {
     if (msg.method === 'initialize') api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
@@ -285,15 +316,31 @@ test('stop 端点中止回合 → 广播 stopped 收尾；重复 stop → 404', 
   });
   await withServer(
     async (base) => {
-      const res1 = await post(base, { ...VALID, convId: 'cv9' });
+      const res1 = await post(base, { ...VALID, convId: 'cv9', turnId: 't-cv9' });
       assert.equal(res1.status, 200);
       await new Promise((r) => setTimeout(r, 80));
-      assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'cv9' })).status, 200);
+      // turnId 不匹配 → 404 且不停仍在跑的回合（后续正确 stop 仍能命中）
+      assert.equal(
+        (await postJson(`${base}/api/chat/stop`, { convId: 'cv9', turnId: 'stale' }))
+          .status,
+        404,
+      );
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(
+        (await postJson(`${base}/api/chat/stop`, { convId: 'cv9', turnId: 't-cv9' }))
+          .status,
+        200,
+      );
       const text = await res1.text();
       assert.match(text, /"type":"stopped"/);
       assert.doesNotMatch(text, /"type":"done"/);
-      // 已收尾：重复 stop → 404
+      // 已收尾：重复 stop → 404（无论带不带 turnId）
       assert.equal((await postJson(`${base}/api/chat/stop`, { convId: 'cv9' })).status, 404);
+      assert.equal(
+        (await postJson(`${base}/api/chat/stop`, { convId: 'cv9', turnId: 't-cv9' }))
+          .status,
+        404,
+      );
     },
     { spawnImpl: hanging },
   );
@@ -329,6 +376,12 @@ test('validateChatBody 新字段校验', () => {
   assert.ok(validateChatBody({ ...VALID, sessionId: 'a'.repeat(300) }).error);
   assert.ok(validateChatBody({ ...VALID, kind: 'work', sessionId: 'sid-123.x' }).question);
   assert.ok(validateChatBody({ ...VALID, workspace: '/abs/dir' }).question);
+  // turnId：可缺省；非法形状拒绝；合法透传
+  assert.equal(validateChatBody(VALID).turnId, '', '缺省 turnId 归一为空串');
+  assert.equal(validateChatBody({ ...VALID, turnId: 't-ok_1' }).turnId, 't-ok_1');
+  assert.ok(validateChatBody({ ...VALID, turnId: 42 }).error);
+  assert.ok(validateChatBody({ ...VALID, turnId: 'a'.repeat(81) }).error);
+  assert.ok(validateChatBody({ ...VALID, turnId: 'bad id!' }).error);
 });
 
 test('validateChatBody images 校验', () => {
@@ -399,6 +452,27 @@ test('work 回合 → done 带 sessionId + git 事件', async () => {
       assert.equal(git.snapshot.available, false, '临时目录非 git 仓库');
     },
     { spawnImpl: fakeSpawn(workScript()) },
+  );
+});
+
+test('work session/load RPC 拒绝 → error 事件带 session_load_failed 码、无 done', async () => {
+  await withServer(
+    async (base) => {
+      const res = await post(base, {
+        ...VALID,
+        kind: 'work',
+        workspace: '',
+        sessionId: 'gone-session',
+      });
+      assert.equal(res.status, 200, '开流后才失败 → 仍是 200 NDJSON');
+      const events = await readEvents(res);
+      const err = events.find((e) => e.type === 'error');
+      assert.ok(err, '应有 error 事件');
+      assert.equal(err.code, 'session_load_failed');
+      assert.match(err.message, /无法恢复/);
+      assert.ok(!events.some((e) => e.type === 'done'), '失败回合无 done');
+    },
+    { spawnImpl: fakeSpawn(workScript({ loadError: true })) },
   );
 });
 
@@ -966,5 +1040,286 @@ test('/api/attachment：上传落盘 → GET 取回原图；非法输入拒绝',
       );
     },
     { attachDir: dir },
+  );
+});
+
+// ---------- elicitation（agent 提问） ----------
+
+function eliScript() {
+  return (msg, api, child) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, { sessionId: 's1' });
+    } else if (msg.method === 'session/set_mode') {
+      api.respond(msg.id, {});
+    } else if (msg.method === 'session/prompt') {
+      const eid = api.request('elicitation/create', {
+        mode: 'form',
+        sessionId: 's1',
+        message: 'Which color?',
+        requestedSchema: {
+          type: 'object',
+          required: ['q0'],
+          properties: {
+            q0: {
+              type: 'string',
+              title: 'Color',
+              oneOf: [{ const: 'red', title: '红色' }, { const: 'blue', title: '蓝色' }],
+            },
+            q1: { type: 'string', title: '备注' },
+          },
+        },
+        _meta: { 'cognition.ai/allowOther': false, 'cognition.ai/toolCallId': 'tc1' },
+      });
+      api.notify('session/update', {
+        sessionId: 's1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '问' } },
+      });
+      const t = setInterval(() => {
+        if (child.responses.has(eid)) {
+          clearInterval(t);
+          clearTimeout(fallback);
+          api.notify('session/update', {
+            sessionId: 's1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: JSON.stringify(child.responses.get(eid).result) },
+            },
+          });
+          api.respond(msg.id, { stopReason: 'end_turn' });
+        }
+      }, 10);
+      const fallback = setTimeout(() => {
+        clearInterval(t);
+        api.respond(msg.id, { stopReason: 'end_turn' });
+      }, 5000);
+    }
+  };
+}
+
+test('elicitation 链路：事件广播 + 决策回传 agent + 错误分支', async () => {
+  await withServer(
+    async (base) => {
+      // 无活跃提问 → 404
+      assert.equal(
+        (
+          await postJson(`${base}/api/chat/elicitation`, {
+            requestId: 'nope',
+            action: 'cancel',
+          })
+        ).status,
+        404,
+      );
+      const res = await post(base, { ...VALID, kind: 'work', workspace: '' });
+      let decided = false;
+      const events = await readEvents(res, async (ev) => {
+        if (ev.type !== 'elicitation' || decided) return;
+        decided = true;
+        // 缺 requestId → 400
+        assert.equal(
+          (await postJson(`${base}/api/chat/elicitation`, { action: 'accept' })).status,
+          400,
+        );
+        // 错误 requestId → 404
+        assert.equal(
+          (
+            await postJson(`${base}/api/chat/elicitation`, {
+              requestId: 'wrong',
+              action: 'accept',
+            })
+          ).status,
+          404,
+        );
+        // 正常 accept（带 content + 超长/多余键应被有界清洗）
+        assert.equal(
+          (
+            await postJson(`${base}/api/chat/elicitation`, {
+              requestId: ev.requestId,
+              action: 'accept',
+              content: { q0: 'blue', q1: 'y'.repeat(5000), junk: 'evil' },
+            })
+          ).status,
+          200,
+        );
+        // 重复作答 → 404
+        assert.equal(
+          (
+            await postJson(`${base}/api/chat/elicitation`, {
+              requestId: ev.requestId,
+              action: 'accept',
+            })
+          ).status,
+          404,
+        );
+      });
+      const eli = events.find((e) => e.type === 'elicitation');
+      assert.ok(eli, '应有 elicitation 事件');
+      assert.equal(eli.message, 'Which color?');
+      assert.equal(eli.fields[0].kind, 'select');
+      assert.equal(eli.fields[0].required, true);
+      assert.equal(eli.fields[0].options.length, 2);
+      // agent 收到的应答：accept + 清洗后的 content（junk 被裁到 2000 字符内）
+      const deltas = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
+      const m = deltas.match(/\{.*\}/s);
+      assert.ok(m, 'agent 应答应出现在文本里');
+      const reply = JSON.parse(m[0]);
+      assert.equal(reply.action, 'accept');
+      assert.equal(reply.content.q0, 'blue');
+      assert.equal(reply.content.junk, undefined, '非 schema 键应被剥离');
+      assert.equal(reply.content.q1.length, 2000, '超长值应被截断到 2000');
+      assert.ok(events.some((e) => e.type === 'done'));
+    },
+    { spawnImpl: fakeSpawn(eliScript()) },
+  );
+});
+
+test('elicitation decline/cancel：动作原样回传，content 不回传', async () => {
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: '' });
+      let decided = false;
+      const events = await readEvents(res, async (ev) => {
+        if (ev.type !== 'elicitation' || decided) return;
+        decided = true;
+        await postJson(`${base}/api/chat/elicitation`, {
+          requestId: ev.requestId,
+          action: 'decline',
+          content: { q0: 'blue' },
+        });
+      });
+      const deltas = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
+      const reply = JSON.parse(deltas.match(/\{.*\}/s)[0]);
+      assert.equal(reply.action, 'decline');
+      assert.equal(reply.content, undefined);
+    },
+    { spawnImpl: fakeSpawn(eliScript()) },
+  );
+});
+
+test('elicitation 无人作答：回合结束自动 cancel', async () => {
+  // agent 提问后不等待答复、直接结束回合：回合收尾时应自动 cancel 未答提问
+  const noWaitScript = (msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, { sessionId: 's1' });
+    } else if (msg.method === 'session/set_mode') {
+      api.respond(msg.id, {});
+    } else if (msg.method === 'session/prompt') {
+      api.request('elicitation/create', {
+        mode: 'form',
+        sessionId: 's1',
+        message: 'Which color?',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            q0: { type: 'string', oneOf: [{ const: 'red' }, { const: 'blue' }] },
+          },
+        },
+      });
+      api.notify('session/update', {
+        sessionId: 's1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '答' } },
+      });
+      api.respond(msg.id, { stopReason: 'end_turn' });
+    }
+  };
+  const spawnBase = fakeSpawn(noWaitScript);
+  let child;
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: '' });
+      const events = await readEvents(res);
+      assert.ok(events.some((e) => e.type === 'elicitation'));
+      assert.ok(events.some((e) => e.type === 'done'));
+      // 给自动 cancel 的写入留出拍头发送时间
+      await new Promise((r) => setTimeout(r, 50));
+      const results = [...child.responses.values()].map((m) => m.result);
+      assert.ok(
+        results.some((r) => r && r.action === 'cancel'),
+        '回合结束未答的提问应收到 cancel',
+      );
+    },
+    { spawnImpl: (c, a, o) => (child = spawnBase(c, a, o)) },
+  );
+});
+
+test('elicitation 已解决后 attach 重放不再复活提问', async () => {
+  let firstStream = null;
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: '' });
+      firstStream = res;
+      let decided = false;
+      const events = await readEvents(res, async (ev) => {
+        if (ev.type !== 'elicitation' || decided) return;
+        decided = true;
+        // 作答后立刻 attach：已解决的提问不应重放
+        await postJson(`${base}/api/chat/elicitation`, {
+          requestId: ev.requestId,
+          action: 'accept',
+          content: { q0: 'red' },
+        });
+        const pid = ev.pid;
+        const attach = await fetch(`${base}/api/chat/attach`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pid }),
+        });
+        const replayed = await readEvents(attach);
+        assert.ok(
+          !replayed.some((e) => e.type === 'elicitation'),
+          '已作答的提问不应在重放中复活',
+        );
+      });
+      assert.ok(events.some((e) => e.type === 'done'));
+    },
+    { spawnImpl: fakeSpawn(eliScript()) },
+  );
+});
+
+test('role/model 事件透传：fusion 模型上报 model 与 role', async () => {
+  const roleScript = (msg, api) => {
+    if (msg.method === 'initialize') {
+      api.respond(msg.id, { protocolVersion: 1, agentCapabilities: {} });
+    } else if (msg.method === 'session/new') {
+      api.respond(msg.id, {
+        sessionId: 's1',
+        configOptions: [
+          { id: 'model', currentValue: 'fusion-opus-5-5-sidekick-swe-2-medium', options: [] },
+        ],
+      });
+    } else if (msg.method === 'session/set_mode') {
+      api.respond(msg.id, {});
+    } else if (msg.method === 'session/prompt') {
+      api.notify('session/update', {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 't1',
+          title: 'Ran explore subagent',
+          rawInput: { profile: 'subagent_explore' },
+          _meta: { 'cognition.ai/inferenceToolName': 'run_subagent' },
+        },
+      });
+      api.notify('session/update', {
+        sessionId: 's1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '答' } },
+      });
+      api.respond(msg.id, { stopReason: 'end_turn' });
+    }
+  };
+  await withServer(
+    async (base) => {
+      const res = await post(base, { ...VALID, kind: 'work', workspace: '' });
+      const events = await readEvents(res);
+      const model = events.find((e) => e.type === 'model');
+      assert.ok(model, '应有 model 事件');
+      assert.equal(model.model, 'fusion-opus-5-5-sidekick-swe-2-medium');
+      const roles = events.filter((e) => e.type === 'role').map((e) => e.role);
+      assert.ok(roles.includes('sidekick'), 'subagent 委派应产生 sidekick 角色事件');
+    },
+    { spawnImpl: fakeSpawn(roleScript) },
   );
 });

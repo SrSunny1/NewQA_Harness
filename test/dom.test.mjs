@@ -17,6 +17,7 @@ const { window } = dom;
 globalThis.window = window;
 globalThis.document = window.document;
 globalThis.localStorage = window.localStorage;
+globalThis.NodeFilter = window.NodeFilter;
 globalThis.requestAnimationFrame =
   window.requestAnimationFrame?.bind(window) ?? ((cb) => setTimeout(cb, 0));
 globalThis.cancelAnimationFrame =
@@ -100,7 +101,10 @@ const chatCalls = []; // { body }，/api/chat 的每次请求体
 let optionsCalls = 0;
 let chatResponder = null;
 let attachResponder = null; // 注入 /api/chat/attach 的流
+let stopResponder = null; // 注入 /api/chat/stop 的响应（可抛错模拟断网）
 const attachCalls = []; // 测试可注入自定义流（如挂起模拟 pending）
+const stopCalls = []; // /api/chat/stop 的每次请求体
+const eliPosts = []; // /api/chat/elicitation 的每次决策 POST
 
 function ndjson(events) {
   return new Response(
@@ -156,13 +160,22 @@ globalThis.fetch = async (url, init = {}) => {
     return Response.json({ path: '/tmp', parent: null, folders: [], truncated: false });
   }
   if (u === '/api/chat/permission') return Response.json({ ok: true });
+  if (u === '/api/chat/elicitation') {
+    eliPosts.push(JSON.parse(init.body));
+    return Response.json({ ok: true });
+  }
   if (u === '/api/chat/attach') {
     const body = JSON.parse(init.body);
     attachCalls.push(body);
     if (attachResponder) return attachResponder(body);
     return Response.json({ error: '该对话没有进行中或可回放的回合' }, { status: 404 });
   }
-  if (u === '/api/chat/stop') return Response.json({ ok: true });
+  if (u === '/api/chat/stop') {
+    const body = JSON.parse(init.body);
+    stopCalls.push(body);
+    if (stopResponder) return stopResponder(body);
+    return Response.json({ ok: true });
+  }
   return new Response('not found', { status: 404 });
 };
 
@@ -439,6 +452,7 @@ test('dom：work 回合 POST body 携带 modelConfig', async () => {
   assert.ok(chatCalls.length > before, '发出 /api/chat');
   const body = chatCalls[chatCalls.length - 1].body;
   assert.equal(body.kind, 'work');
+  assert.match(body.turnId, /^[\w-]{20,}$/, '请求携带回合唯一标识 turnId');
   assert.deepEqual(body.modelConfig, {
     model: 'opus',
     thought_level: 'low',
@@ -467,6 +481,7 @@ test('dom：支线走 work 通道——独立会话 id、不污染主线 session
   );
   assert.ok(askBtn, '划词工具条有「追问」');
   await click(askBtn);
+  assert.equal(window.getSelection().rangeCount, 0, '动作完成后原生选区已清除');
   const branchTa = container.querySelector('.branch-ui .composer-input');
   assert.ok(branchTa, '支线输入框出现');
   // 支线输入框无斜杠面板（combo 未启用）
@@ -818,12 +833,343 @@ test('dom：流中途断开 → 已生成内容存为不完整回合，问题不
     });
     const turns2 = [...container.querySelectorAll('.turn[data-turn]')];
     assert.match(turns2.at(-1).querySelector('.turn-a').textContent, /已生成了一半/);
+    // 断流收尾后输入框可用：不完整回合入库后还能继续正常提问
+    chatResponder = null; // 受控流已关；回到默认响应
+    const ta2 = container.querySelector('#composer-main');
+    assert.ok(!ta2.disabled, '断流收尾后输入框可用');
+    await setText(ta2, '接着问');
+    await key(ta2, 'Enter');
+    await act(async () => {
+      await tick(50);
+    });
+    const turns3 = [...container.querySelectorAll('.turn[data-turn]')];
+    assert.equal(turns3.length, turns2.length + 1, '后续提问追加新回合');
+    assert.match(turns3.at(-1).querySelector('.turn-a').textContent, /答：你好/);
   } finally {
     chatResponder = null;
+    attachResponder = null;
     try {
       ctrl?.close();
     } catch {}
   }
+});
+
+test('dom：断流后重挂同一回合不重复内容', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-ra', title: '重挂测试', turns: [], workspace: '', sessionId: null },
+      ],
+      activeId: 'cv-ra',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  const first = controlledNdjson();
+  const replay = controlledNdjson();
+  chatResponder = () => first.res;
+  attachResponder = () => replay.res;
+  attachCalls.length = 0;
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '断流问题');
+    await key(ta, 'Enter');
+    await act(async () => {
+      first.push({ type: 'delta', text: '一半' });
+      await tick(30);
+    });
+    assert.match(
+      container.querySelector('.pending .turn-a').textContent,
+      /一半/,
+      '首个 delta 已上屏',
+    );
+    // 无 done 直接断流 → 客户端应按 turnId 自动 attach 重挂
+    await act(async () => {
+      first.close();
+      await tick(80);
+    });
+    assert.equal(attachCalls.length, 1, '断流后自动 attach 一次');
+    const chatBody = chatCalls.at(-1).body;
+    assert.equal(attachCalls[0].convId, 'cv-ra');
+    assert.equal(attachCalls[0].convId, chatBody.convId);
+    assert.equal(attachCalls[0].turnId, chatBody.turnId, 'attach 绑定同一回合 turnId');
+    // 服务端重放已流出的「一半」再续上：重放段不得重复进回答
+    await act(async () => {
+      replay.push({ type: 'delta', text: '一半' });
+      replay.push({ type: 'delta', text: '续上' });
+      replay.push({ type: 'done', sessionId: 'sess-ra' });
+      replay.close();
+      await tick(60);
+    });
+    assert.ok(!container.querySelector('.pending'), 'pending 已清');
+    const last = [...container.querySelectorAll('.turn[data-turn]')].at(-1);
+    assert.equal(
+      last.querySelector('.turn-a').textContent.trim(),
+      '一半续上',
+      '重放内容不重复上屏',
+    );
+    assert.ok(!container.querySelector('#composer-main').disabled, '输入框恢复可用');
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    assert.equal(
+      stored.conversations.find((c) => c.id === 'cv-ra').sessionId,
+      'sess-ra',
+      '重挂回合的 sessionId 正常入库',
+    );
+  } finally {
+    chatResponder = null;
+    attachResponder = null;
+  }
+});
+
+test('dom：断网后下次发送先清理精确旧回合', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-off', title: '断网测试', turns: [], workspace: '', sessionId: null },
+      ],
+      activeId: 'cv-off',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  const first = controlledNdjson();
+  const seq = [];
+  let chatN = 0;
+  chatResponder = () => {
+    chatN += 1;
+    if (chatN === 1) {
+      seq.push('chat1');
+      return first.res;
+    }
+    seq.push('chat2');
+    return ndjson([
+      { type: 'delta', text: '新答' },
+      { type: 'done', sessionId: 's2' },
+    ]);
+  };
+  // 断网：attach 与 stop 都抛 TypeError
+  attachResponder = () => Promise.reject(new TypeError('offline'));
+  stopResponder = (body) => {
+    seq.push(`stop:${body.turnId}`);
+    return Promise.reject(new TypeError('offline'));
+  };
+  attachCalls.length = 0;
+  stopCalls.length = 0;
+  const chatBase = chatCalls.length; // 共享累计数组，按相对索引取本测试请求
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '断网问题');
+    await key(ta, 'Enter');
+    await act(async () => {
+      first.push({ type: 'delta', text: '半截' });
+      await tick(20);
+      first.close();
+      await tick(80);
+    });
+    const t1 = chatCalls[chatBase].body.turnId;
+    assert.equal(attachCalls.length, 1, '断流后尝试过 attach');
+    assert.equal(stopCalls.length, 1, '断流后尝试过精确 stop');
+    assert.deepEqual(stopCalls[0], { convId: 'cv-off', turnId: t1 });
+    assert.ok(!container.querySelector('.pending'), '断网收尾后 pending 已清');
+    assert.ok(!ta.disabled, '断网收尾后输入框可用');
+    // 部分内容入库 + inflight 留中断标记（精确 turnId 不丢）
+    const infl = JSON.parse(window.localStorage.getItem('newqa:inflight'));
+    assert.equal(infl.length, 1, 'inflight 标记保留待清理');
+    assert.equal(infl[0].interrupted, true);
+    assert.equal(infl[0].turnId, t1);
+    // 恢复网络：下次发送前先按精确 turnId 清理服务端旧回合
+    stopResponder = (body) => {
+      seq.push(`stop:${body.turnId}`);
+      return Response.json({ ok: true });
+    };
+    await setText(ta, '再来一条');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(80);
+    });
+    assert.equal(stopCalls.length, 2, '发送前再发一次精确 stop');
+    assert.deepEqual(stopCalls[1], { convId: 'cv-off', turnId: t1 }, '清理的是旧回合');
+    const t2 = chatCalls.at(-1).body.turnId;
+    assert.notEqual(t2, t1, '新回合用新 turnId');
+    assert.deepEqual(seq.slice(-2), [`stop:${t1}`, 'chat2'], '清理先于第二次发送');
+    const infl2 = window.localStorage.getItem('newqa:inflight') || '';
+    assert.ok(!infl2.includes('interrupted'), '旧中断标记已清除');
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv = stored.conversations.find((c) => c.id === 'cv-off');
+    assert.equal(conv.turns.length, 2, '不完整回合与新回合各一，不重复');
+    assert.match(conv.turns[0].answer, /半截/);
+    assert.match(conv.turns.at(-1).answer, /新答/);
+  } finally {
+    chatResponder = null;
+    attachResponder = null;
+    stopResponder = null;
+  }
+});
+
+test('dom：失效原生会话重试仍在原对话', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        {
+          id: 'cv-gone',
+          title: '旧会话',
+          workspace: '',
+          sessionId: 'gone-session',
+          turns: [
+            { id: 't-old', question: '旧问', answer: '旧答', notes: [], branches: [] },
+          ],
+        },
+      ],
+      activeId: 'cv-gone',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  let calls = 0;
+  chatResponder = () =>
+    ++calls === 1
+      ? ndjson([
+          {
+            type: 'error',
+            message: '无法恢复之前的 Devin 会话；重试时将使用当前对话的记录继续',
+            code: 'session_load_failed',
+          },
+        ])
+      : ndjson([
+          { type: 'delta', text: '新答' },
+          { type: 'done', sessionId: 'sess-new' },
+        ]);
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '再问一下');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(60);
+    });
+    // 失败收尾：pending 清除、输入框可用、问题回填为草稿
+    assert.ok(!container.querySelector('.pending'), '失败回合 pending 已清');
+    assert.ok(!ta.disabled, '输入框恢复可用');
+    assert.equal(ta.value, '再问一下', '问题回填为草稿便于重试');
+    // 存的失效 sessionId 被清掉；已有回合与转录不受影响
+    const stored1 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv1 = stored1.conversations.find((c) => c.id === 'cv-gone');
+    assert.equal(conv1.sessionId, null, '失效原生会话 id 已重置');
+    assert.equal(conv1.turns.length, 1, '旧回合未被删除');
+    assert.equal(conv1.turns[0].answer, '旧答');
+    // 重试：同一 convId、sessionId null（新会话）、本地历史随请求带上
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(60);
+    });
+    const body2 = chatCalls.at(-1).body;
+    assert.equal(body2.convId, 'cv-gone');
+    assert.equal(body2.sessionId, null, '重试开新会话而非再撞死会话');
+    assert.deepEqual(
+      body2.history.map((h) => [h.role, h.text]),
+      [
+        ['user', '旧问'],
+        ['assistant', '旧答'],
+      ],
+      '本地历史随重试发送',
+    );
+    const stored2 = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv2 = stored2.conversations.find((c) => c.id === 'cv-gone');
+    assert.equal(conv2.sessionId, 'sess-new', '新会话 id 持久化');
+    assert.equal(conv2.turns.length, 2, '新旧回合都在，无删除');
+    assert.match(conv2.turns.at(-1).answer, /新答/);
+  } finally {
+    chatResponder = null;
+    attachResponder = null;
+  }
+});
+
+test('dom：attach 404——残留 inflight 清场，问题回填可重发', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-404', title: '恢复失败', turns: [], workspace: '', sessionId: null },
+      ],
+      activeId: 'cv-404',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  // 模拟刷新前的进行中回合（含 turnId）：服务端已重启 → attach 404
+  window.localStorage.setItem(
+    'newqa:inflight',
+    JSON.stringify([
+      {
+        pid: 'p-404',
+        convId: 'cv-404',
+        turnId: 'p-404',
+        sessionId: 'sess-x',
+        path: [],
+        question: '没跑完的问题',
+        images: [],
+        imageUrls: null,
+        draftKey: 'main:cv-404',
+        modelAtSend: '',
+        speedAtSend: '',
+        startedAt: Date.now(),
+      },
+    ]),
+  );
+  attachCalls.length = 0; // attachResponder 缺省 → mock 返回 404
+  await mountApp();
+  await act(async () => {
+    await tick(60);
+  });
+  assert.equal(attachCalls.length, 1, '挂载时对 inflight 回合发起 attach');
+  assert.equal(attachCalls[0].convId, 'cv-404');
+  assert.equal(attachCalls[0].turnId, 'p-404', '新 inflight 携带 turnId');
+  assert.ok(!container.querySelector('.pending'), '404 后 pending 残影已清');
+  assert.ok(
+    !(window.localStorage.getItem('newqa:inflight') || '').includes('p-404'),
+    'inflight 标记已清',
+  );
+  const ta = container.querySelector('#composer-main');
+  assert.ok(!ta.disabled, '输入框可用');
+  assert.equal(ta.value, '没跑完的问题', '问题回填草稿可修改重发');
+  // 重新提问正常走完一轮
+  await key(ta, 'Enter');
+  await act(async () => {
+    await tick(60);
+  });
+  assert.match(container.textContent, /答：你好/, '重发后正常出答');
+  const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+  assert.equal(
+    stored.conversations.find((c) => c.id === 'cv-404').turns.length,
+    1,
+    '重发回合入库',
+  );
 });
 
 test('dom：斜杠命令原文下发（history 不进 envelope）', async () => {
@@ -1113,28 +1459,474 @@ test('dom：刷新恢复——inflight 回合经 attach 重挂、重放完成后
     ]),
   );
   attachCalls.length = 0;
-  attachResponder = () =>
-    ndjson([
-      { type: 'delta', text: '恢复的回答' },
-      { type: 'done', sessionId: 'sess-re' },
-    ]);
+  // 服务端响应头透传回合起点：计时跨刷新连续（种子 65s 前开始）
+  const ctl = controlledNdjson({ 'X-NewQA-Turn-Started-At': String(Date.now() - 65_000) });
+  attachResponder = () => ctl.res;
   await mountApp();
+  const timer = container.querySelector('[role="timer"]');
+  assert.ok(timer);
+  const first = timer.textContent;
+  assert.match(first, /^已用时 1 分 \d{2} 秒$/);
+  await act(async () => { await tick(1100); });
+  assert.notEqual(timer.textContent, first, '刷新恢复的计时继续更新');
   await act(async () => {
+    ctl.push({ type: 'delta', text: '恢复的回答' });
+    ctl.push({ type: 'done', sessionId: 'sess-re', durationMs: 75_000 });
+    ctl.close();
     await tick(50);
   });
+  assert.equal(container.querySelector('[role="timer"]'), null);
+  assert.equal(
+    container.querySelector('.turn-duration-final')?.textContent,
+    '用时 1 分 15 秒',
+  );
   assert.equal(attachCalls.length, 1, '挂载后对进行中的回合发起 attach');
   assert.equal(attachCalls[0].convId, 'cv-re');
+  assert.equal(attachCalls[0].turnId, undefined, '旧版 inflight 不带 turnId，按 convId 回退');
   const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
   const conv = stored.conversations.find((c) => c.id === 'cv-re');
   assert.equal(conv.turns.length, 1, '重放完成后回合入库');
   assert.equal(conv.turns[0].question, '跑一个长任务');
   assert.match(conv.turns[0].answer, /恢复的回答/);
   assert.equal(conv.sessionId, 'sess-re', 'done 的 sessionId 写回会话');
+  assert.equal(conv.turns[0].durationMs, 75_000, 'done 的 durationMs 入库');
   assert.ok(
     !(window.localStorage.getItem('newqa:inflight') || '').includes('p-re'),
     'inflight 标记已清除',
   );
   attachResponder = null;
+  // 重挂载走 asTurn 反序列化：最终耗时仍渲染
+  await unmountApp();
+  await mountApp();
+  assert.equal(
+    container.querySelector('.turn-duration-final')?.textContent,
+    '用时 1 分 15 秒',
+  );
+});
+
+test('dom：锚点块索引漂移时用引文找回正文高亮', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  const oldCSS = globalThis.CSS;
+  const oldHighlight = globalThis.Highlight;
+  const registry = new Map();
+  class FakeHighlight extends Set {}
+  globalThis.CSS = { highlights: registry };
+  globalThis.Highlight = FakeHighlight;
+  try {
+    window.localStorage.setItem(
+      'newqa:v1',
+      JSON.stringify({
+        v: 1,
+        conversations: [
+          {
+            id: 'cv-anchor',
+            title: '锚点漂移',
+            workspace: '',
+            sessionId: null,
+            turns: [
+              {
+                id: 't-anchor',
+                question: 'q',
+                answer: 'abcdef',
+                tools: [
+                  {
+                    id: 'tool-anchor',
+                    kind: 'execute',
+                    status: 'completed',
+                    command: '',
+                    output: '',
+                    locations: [],
+                    textOffset: 3,
+                  },
+                ],
+                notes: [
+                  {
+                    id: 'n-anchor',
+                    anchor: {
+                      startBlock: 0,
+                      startOffset: 2,
+                      endBlock: 0,
+                      endOffset: 6,
+                      quote: 'cdef',
+                    },
+                    text: '',
+                    color: 'yellow',
+                  },
+                ],
+                branches: [],
+              },
+            ],
+          },
+        ],
+        activeId: 'cv-anchor',
+        workspaces: [],
+        wsNames: {},
+      }),
+    );
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    assert.ok(container.querySelector('.ci-mark'), '右侧导航列出标注');
+    const hl = registry.get('nq-n-yellow');
+    assert.ok(hl, '黄色标注的 Highlight 已注册');
+    assert.equal(
+      [...hl].map((r) => r.toString()).join(''),
+      'cdef',
+      '块索引漂移后仍用引文找回正文 Range',
+    );
+  } finally {
+    if (oldCSS === undefined) delete globalThis.CSS;
+    else globalThis.CSS = oldCSS;
+    if (oldHighlight === undefined) delete globalThis.Highlight;
+    else globalThis.Highlight = oldHighlight;
+  }
+});
+
+test('dom：刷新中途中断——卸载期 abort 不清 inflight、不落不完整回合', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        { id: 'cv-ul', title: '卸载测试', turns: [], workspace: '/tmp/ws-a', sessionId: null },
+      ],
+      activeId: 'cv-ul',
+      workspaces: ['/tmp/ws-a'],
+      wsNames: {},
+    }),
+  );
+  let ctrl;
+  chatResponder = () =>
+    new Response(new ReadableStream({ start(c) { ctrl = c; } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/x-ndjson' },
+    });
+  try {
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const ta = container.querySelector('#composer-main');
+    await setText(ta, '刷新前的提问');
+    await key(ta, 'Enter');
+    await act(async () => {
+      await tick(30);
+    });
+    const inflight = JSON.parse(
+      window.localStorage.getItem('newqa:inflight') || '[]',
+    );
+    assert.equal(inflight.length, 1, '发送后 inflight 已落盘');
+    const pid = inflight[0].pid;
+    // 模拟刷新：浏览器先派 beforeunload，再 abort 在途流
+    await act(async () => {
+      window.dispatchEvent(new window.Event('beforeunload'));
+      ctrl.error(new Error('aborted by navigation'));
+      await tick(30);
+    });
+    const after = window.localStorage.getItem('newqa:inflight') || '';
+    assert.ok(after.includes(pid), '卸载中断后 inflight 标记仍在，可重挂');
+    const stored = JSON.parse(window.localStorage.getItem('newqa:v1'));
+    const conv = stored.conversations.find((c) => c.id === 'cv-ul');
+    assert.equal(conv.turns.length, 0, '未把中断内容存成不完整回合');
+  } finally {
+    chatResponder = null;
+    try {
+      ctrl?.close();
+    } catch {}
+  }
+});
+
+test('dom：同色多条标注共用高亮桶，全部 Range 都保留', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  const oldCSS = globalThis.CSS;
+  const oldHighlight = globalThis.Highlight;
+  const registry = new Map();
+  class FakeHighlight extends Set {}
+  globalThis.CSS = { highlights: registry };
+  globalThis.Highlight = FakeHighlight;
+  try {
+    window.localStorage.setItem(
+      'newqa:v1',
+      JSON.stringify({
+        v: 1,
+        conversations: [
+          {
+            id: 'cv-hl2',
+            title: '双标注',
+            workspace: '',
+            sessionId: null,
+            turns: [
+              {
+                id: 't-hl2',
+                question: 'q',
+                answer: 'abcdef',
+                tools: [],
+                notes: [
+                  {
+                    id: 'n-hl2a',
+                    anchor: {
+                      startBlock: 0, startOffset: 0, endBlock: 0, endOffset: 2,
+                      quote: 'ab',
+                    },
+                    text: '',
+                    color: 'yellow',
+                  },
+                  {
+                    id: 'n-hl2b',
+                    anchor: {
+                      startBlock: 0, startOffset: 4, endBlock: 0, endOffset: 6,
+                      quote: 'ef',
+                    },
+                    text: '',
+                    color: 'yellow',
+                  },
+                ],
+                branches: [],
+              },
+            ],
+          },
+        ],
+        activeId: 'cv-hl2',
+        workspaces: [],
+        wsNames: {},
+      }),
+    );
+    await mountApp();
+    await act(async () => {
+      await tick(30);
+    });
+    const hl = registry.get('nq-n-yellow');
+    assert.ok(hl, '黄色标注的 Highlight 已注册');
+    const texts = [...hl].map((r) => r.toString()).sort();
+    assert.deepEqual(texts, ['ab', 'ef'], '同桶两条标注的 Range 都在（后者不再清掉前者）');
+  } finally {
+    if (oldCSS === undefined) delete globalThis.CSS;
+    else globalThis.CSS = oldCSS;
+    if (oldHighlight === undefined) delete globalThis.Highlight;
+    else globalThis.Highlight = oldHighlight;
+  }
+});
+
+// 可控流：手动 push 事件、手动关闭（挂起模拟进行中的回合）
+function controlledNdjson(headers = {}) {
+  let ctrl;
+  const stream = new ReadableStream({
+    start(c) {
+      ctrl = c;
+    },
+  });
+  return {
+    res: new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'application/x-ndjson', ...headers },
+    }),
+    push: (ev) => ctrl.enqueue(enc(JSON.stringify(ev) + '\n')),
+    close: () => ctrl.close(),
+  };
+}
+
+test('dom：elicitation 弹窗——必填校验、提交 accept、跳过 decline', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [{ id: 'cv-eli', title: '提问测试', turns: [], workspace: '' }],
+      activeId: 'cv-eli',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  const ctl = controlledNdjson();
+  chatResponder = () => {
+    setTimeout(() => {
+      ctl.push({ type: 'delta', text: '先说一句' });
+      ctl.push({
+        type: 'elicitation',
+        requestId: 'e-1',
+        message: 'Which color?',
+        fields: [
+          {
+            key: 'q0',
+            kind: 'select',
+            title: 'Color',
+            required: true,
+            options: [
+              { value: 'red', label: '红色' },
+              { value: 'blue', label: '蓝色' },
+            ],
+          },
+        ],
+        allowOther: false,
+      });
+    }, 10);
+    return ctl.res;
+  };
+  eliPosts.length = 0;
+  await mountApp();
+  await act(async () => {
+    await tick(30);
+  });
+  const ta = container.querySelector('#composer-main');
+  await setText(ta, '随便做点什么');
+  await key(ta, 'Enter');
+  await act(async () => {
+    await tick(60);
+  });
+  const card = container.querySelector('.elicit-card');
+  assert.ok(card, 'elicitation 弹窗应出现');
+  assert.ok(card.textContent.includes('Which color?'));
+  const submit = [...card.querySelectorAll('button')].find((b) => b.textContent.includes('提交'));
+  assert.ok(submit.disabled, '必填未答时提交禁用');
+  // 选择「红色」单选
+  const radio = card.querySelector('input[type="radio"]');
+  await click(radio);
+  await act(async () => {
+    await tick(10);
+  });
+  assert.ok(!submit.disabled, '回答后提交可用');
+  await click(submit);
+  await act(async () => {
+    await tick(20);
+  });
+  assert.equal(eliPosts.length, 1);
+  assert.equal(eliPosts[0].requestId, 'e-1');
+  assert.equal(eliPosts[0].action, 'accept');
+  assert.deepEqual(eliPosts[0].content, { q0: 'red' });
+  assert.ok(!container.querySelector('.elicit-card'), '提交后弹窗关闭');
+  // 第二个提问：跳过 → decline
+  await act(async () => {
+    ctl.push({
+      type: 'elicitation',
+      requestId: 'e-2',
+      message: '再说点别的？',
+      fields: [{ key: 'q0', kind: 'text', title: '备注', required: false, options: [] }],
+      allowOther: false,
+    });
+    await tick(30);
+  });
+  const card2 = container.querySelector('.elicit-card');
+  assert.ok(card2, '第二个弹窗应出现');
+  const skip = [...card2.querySelectorAll('button')].find((b) => b.textContent.includes('跳过'));
+  await click(skip);
+  await act(async () => {
+    await tick(20);
+  });
+  assert.equal(eliPosts.length, 2);
+  assert.equal(eliPosts[1].action, 'decline');
+  assert.ok(!eliPosts[1].content || !Object.keys(eliPosts[1].content).length, '跳过不带回答');
+  await act(async () => {
+    ctl.push({ type: 'done', sessionId: 'sess-eli' });
+    ctl.close();
+    await tick(30);
+  });
+  chatResponder = null;
+});
+
+test('dom：fusion 实时指示——model 事件出配对，role 事件切高亮', async () => {
+  await unmountApp();
+  window.localStorage.clear();
+  window.localStorage.setItem(
+    'newqa:v1',
+    JSON.stringify({
+      v: 1,
+      conversations: [
+        {
+          id: 'cv-fus',
+          title: '融合测试',
+          turns: [],
+          workspace: '',
+          modelConfig: { model: 'fusion-sonnet-sidekick-glm-5-2' },
+        },
+      ],
+      activeId: 'cv-fus',
+      workspaces: [],
+      wsNames: {},
+    }),
+  );
+  const ctl = controlledNdjson();
+  chatResponder = () => ctl.res;
+  await mountApp();
+  await act(async () => {
+    await tick(30);
+  });
+  const ta = container.querySelector('#composer-main');
+  await setText(ta, '实现一个功能');
+  await key(ta, 'Enter');
+  await act(async () => {
+    await tick(60);
+  });
+  // 设置摘要：未上报实际模型时回落所选 fusion 配对，lead 侧绿色高亮
+  const summary = container.querySelector('.settings-summary');
+  const activeSummary = () =>
+    [...summary.querySelectorAll('.fusion-model-active')].map((el) => el.textContent);
+  assert.deepEqual(activeSummary(), ['Sonnet']);
+  // pending 指示器同样在 model 事件前出现：回落发送时所选配对，仅 Leader 名高亮
+  const activeLive = () =>
+    [...container.querySelectorAll('.fusion-live .fusion-model-active')].map(
+      (el) => el.textContent,
+    );
+  const live0 = container.querySelector('.fusion-live');
+  assert.ok(live0, 'model 事件前 pending 指示器已出现（回落所选配对）');
+  assert.ok(live0.textContent.includes('Lead · Sonnet'), '回落 leader 取探测名');
+  assert.ok(live0.textContent.includes('Sidekick · GLM-5.2'), '回落 sidekick 取探测名');
+  assert.deepEqual(activeLive(), ['Sonnet'], 'model 事件前仅所选 Leader 名高亮');
+  await act(async () => {
+    ctl.push({ type: 'model', model: 'fusion-opus-sidekick-swe-2-high' });
+    ctl.push({ type: 'delta', text: 'lead 在写' });
+    await tick(0);
+  });
+  assert.deepEqual(activeSummary(), ['Opus']);
+  assert.match(summary.textContent, /Fusion \(Opus \+ SWE-2 High\)/);
+  const live = container.querySelector('.fusion-live');
+  assert.ok(live, 'fusion 指示器应出现');
+  assert.ok(live.textContent.includes('Lead · Opus'), 'lead 标签取探测名');
+  assert.ok(live.textContent.includes('Sidekick · SWE-2 High'), 'sidekick 标签取探测名');
+  assert.ok(live.querySelector('.fusion-pill.lead.active'), '缺省 lead 高亮');
+  assert.ok(!live.querySelector('.fusion-pill.side.active'), 'sidekick 初始不亮');
+  assert.deepEqual(activeLive(), ['Opus'], '实时模型下 Lead 侧高亮 Opus');
+  // sidekick 接管
+  await act(async () => {
+    ctl.push({ type: 'role', role: 'sidekick' });
+    await tick(20);
+  });
+  assert.ok(container.querySelector('.fusion-pill.side.active'), 'sidekick 高亮');
+  assert.ok(!container.querySelector('.fusion-pill.lead.active'), 'lead 熄灭');
+  assert.deepEqual(activeSummary(), ['SWE-2 High']);
+  assert.deepEqual(activeLive(), ['SWE-2 High'], 'sidekick 时仅 Sidekick 名高亮');
+  // lead 继续流式 → 切回
+  await act(async () => {
+    ctl.push({ type: 'role', role: 'lead' });
+    await tick(20);
+  });
+  assert.ok(container.querySelector('.fusion-pill.lead.active'), 'lead 重新高亮');
+  assert.deepEqual(activeSummary(), ['Opus']);
+  // 回合中模型被换（服务端 config_option_update）：liveModel 变化 → 角色复位 lead
+  await act(async () => {
+    ctl.push({ type: 'role', role: 'sidekick' });
+    await tick(10);
+    ctl.push({ type: 'model', model: 'fusion-sonnet-sidekick-glm-5-2' });
+    await tick(20);
+  });
+  assert.deepEqual(activeLive(), ['Sonnet'], '模型变更自动复位 lead 高亮');
+  assert.ok(container.querySelector('.fusion-pill.lead.active'), '换模型后 lead 高亮');
+  await act(async () => {
+    ctl.push({ type: 'done', sessionId: 'sess-fus' });
+    ctl.close();
+    await tick(30);
+  });
+  assert.ok(!container.querySelector('.fusion-live'), '回合结束指示器随 pending 消失');
+  // 结束后摘要回落所选模型文案：无高亮、无 fusion-running 类
+  assert.deepEqual(activeSummary(), []);
+  assert.equal(summary.classList.contains('fusion-running'), false);
+  assert.match(summary.textContent, /Fusion \(Sonnet \+ GLM-5\.2\)/);
+  chatResponder = null;
 });
 
 test('dom：清理', async () => {

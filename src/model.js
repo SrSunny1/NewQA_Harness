@@ -142,6 +142,8 @@ export function createTurn(question, answer, extra = {}) {
   if (iurls.length) turn.imageUrls = iurls;
   if (typeof extra.model === 'string' && extra.model)
     turn.model = extra.model.slice(0, EFFECTIVE_MODEL_LIMIT);
+  if (Number.isSafeInteger(extra.durationMs) && extra.durationMs >= 0)
+    turn.durationMs = extra.durationMs;
   return turn;
 }
 
@@ -583,6 +585,8 @@ function asTurn(raw) {
   // 回合实际生效模型（done 事件上报；旧档无字段 → 缺省）
   if (typeof raw.model === 'string' && raw.model)
     turn.model = raw.model.slice(0, EFFECTIVE_MODEL_LIMIT);
+  if (Number.isSafeInteger(raw.durationMs) && raw.durationMs >= 0)
+    turn.durationMs = raw.durationMs;
   return turn;
 }
 

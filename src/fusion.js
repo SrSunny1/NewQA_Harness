@@ -85,3 +85,18 @@ export function fusionIndices(pairs, uid) {
   );
   return { leaderIdx, sideIdx };
 }
+
+// fusion uid 拆 Lead×Sidekick：fusion-<lead>-sidekick-<side> → {lead, side}。
+export function splitFusionUid(uid) {
+  const m = FUSION_RE.exec(String(uid || ''));
+  return m ? { lead: m[1], side: m[2] } : null;
+}
+
+// 模型 sku 美化：去掉思考档/速度后缀（-medium/-high/-lightning/-fast 等），
+// 留家族主体：claude-opus-5-5-medium → claude-opus-5-5。
+export function prettifyModelKey(key) {
+  return String(key || '').replace(
+    /-(none|low|medium|high|xhigh|max)(-(lightning|fast|priority))*$/i,
+    '',
+  );
+}

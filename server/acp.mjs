@@ -14,6 +14,11 @@ import readline from 'node:readline';
 
 export class AcpError extends Error {}
 
+// RPC 响应级错误（agent 返回 error 字段）：区别于进程失败/超时等本地错误。
+class AcpRpcError extends AcpError {}
+// session/load 的 RPC 拒绝：原生会话失效；客户端可清掉存的会话 id 用本地记录重试。
+export class AcpSessionLoadError extends AcpError {}
+
 class AbortError extends Error {
   constructor() {
     super('已取消');
@@ -140,6 +145,95 @@ function updateModel(u) {
   return null;
 }
 
+// ---- elicitation（agent 向用户提问，ACP form 模式）----
+//
+// 线上实测形状（2026-11，v1 协议 + clientCapabilities.elicitation.form）：
+//   params = { mode:'form', sessionId, message,
+//     requestedSchema: { type:'object', required:[...],
+//       properties: { q0: { type:'string', title, description,
+//         oneOf: [{const, title, _meta:{'cognition.ai/description'}}] } } },
+//     _meta: { 'cognition.ai/allowOther': bool, 'cognition.ai/toolCallId } }
+// 应答 { action: 'accept'|'decline'|'cancel', content?: { q0: 'red' } }。
+const ELI_FIELD_CAP = 8;
+const ELI_OPTION_CAP = 24;
+const eliStr = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+
+// requestedSchema.properties → 有界表单字段清单。
+// kind: 'select'（oneOf/enum 单选）| 'multi'（type:array 多选）| 'text'（自由文本）。
+export function normalizeElicitation(params) {
+  const schema = params?.requestedSchema;
+  const props = schema && typeof schema === 'object' ? schema.properties : null;
+  if (!props || typeof props !== 'object') return null;
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const fields = [];
+  for (const [rawKey, spec] of Object.entries(props)) {
+    if (fields.length >= ELI_FIELD_CAP) break;
+    if (!spec || typeof spec !== 'object') continue;
+    const key = String(rawKey).slice(0, 40);
+    if (!key) continue;
+    const optionList = (list) =>
+      (Array.isArray(list) ? list : [])
+        .slice(0, ELI_OPTION_CAP)
+        .map((o) => {
+          if (o && typeof o === 'object') {
+            const value = typeof o.const === 'string' ? o.const : '';
+            if (!value) return null;
+            return {
+              value: value.slice(0, 200),
+              label: eliStr(o.title, 120) || value.slice(0, 120),
+              description: eliStr(o?._meta?.['cognition.ai/description'], 300),
+            };
+          }
+          return typeof o === 'string' ? { value: o.slice(0, 200), label: o.slice(0, 120), description: '' } : null;
+        })
+        .filter(Boolean);
+    let kind = 'text';
+    let options = [];
+    if (spec.type === 'array') {
+      // 多选：items 里的 oneOf/enum 为候选
+      const items = spec.items && typeof spec.items === 'object' ? spec.items : {};
+      options = optionList(items.oneOf?.length ? items.oneOf : items.enum);
+      kind = options.length ? 'multi' : 'text';
+    } else {
+      options = optionList(spec.oneOf?.length ? spec.oneOf : spec.enum);
+      if (options.length) kind = 'select';
+    }
+    fields.push({
+      key,
+      title: eliStr(spec.title, 120) || key,
+      description: eliStr(spec.description, 300),
+      kind,
+      options,
+      required: required.has(rawKey),
+    });
+  }
+  if (!fields.length) return null;
+  return {
+    message: eliStr(params?.message, 500),
+    fields,
+    allowOther: params?._meta?.['cognition.ai/allowOther'] === true,
+    toolCallId: eliStr(params?._meta?.['cognition.ai/toolCallId'], 128),
+  };
+}
+
+// 按 schema 清洗 UI 提交的 content：只保留已知键，值限字符串/字符串数组。
+export function sanitizeElicitationContent(info, content) {
+  const out = {};
+  if (!content || typeof content !== 'object') return out;
+  for (const f of info.fields) {
+    const v = content[f.key];
+    if (f.kind === 'multi') {
+      if (Array.isArray(v)) {
+        const arr = v.filter((x) => typeof x === 'string').slice(0, ELI_OPTION_CAP).map((x) => x.slice(0, 2000));
+        if (arr.length) out[f.key] = arr;
+      }
+    } else if (typeof v === 'string' && v) {
+      out[f.key] = v.slice(0, 2000);
+    }
+  }
+  return out;
+}
+
 const RPC_TIMEOUT = 30_000;
 // session/prompt 的空闲上限：每次流式更新/权限请求都会重置倒计时，
 // agent 等用户做权限决策时不算卡死；不再是回合总时长的硬上限。
@@ -169,6 +263,9 @@ export function runTurn({
   onDelta = () => {},
   onTool = null,
   onPermission = null,
+  onElicitation = null, // agent 提问（elicitation/create form）→ UI 表单作答
+  onRole = null, // fusion 回合当前活动角色变化（'lead'|'sidekick'）
+  onModel = null, // 配置下发后、prompt 前上报本会话实际模型（fusion 配对可提前展示）
   timeouts = {},
 }) {
   return new Promise((resolve, reject) => {
@@ -194,6 +291,32 @@ export function runTurn({
     let promptReqId = null; // 在飞的 session/prompt 请求 id（用于空闲计时重置）
     const pending = new Map();
     const openPerms = new Set(); // 尚未答复 agent 的权限请求
+    const openElis = new Set(); // 尚未答复 agent 的 elicitation 提问
+    // fusion 角色指示：当前在主线程/工具层活动的角色。sidekick 判定顺序：
+    // _meta 显式标记 → run_subagent 委派（fusion 下探索/实现由廉价模型承担）→ lead。
+    let currentRole = 'lead';
+    // fusion 配对以实际生效模型为准；未上报时回落所选模型（探测前的回合初）。
+    const fusionActive = () =>
+      (effectiveModel || modelConfig?.model)?.startsWith('fusion-') === true;
+    const emitRole = (role) => {
+      if (role === currentRole || !fusionActive() || !onRole) return;
+      currentRole = role;
+      try {
+        onRole(role);
+      } catch {}
+    };
+    // 角色判定：任一 _meta 层级的 cognition.ai/sidekick 显式标记优先
+    // （false=lead，true/对象=sidekick），均无标记时 subagent_context 兜底。
+    const roleOfMeta = (...metas) => {
+      for (const meta of metas) {
+        const marker = meta?.['cognition.ai/sidekick'];
+        if (marker === false) return 'lead';
+        if (marker === true || (marker && typeof marker === 'object')) return 'sidekick';
+      }
+      return metas.some((meta) => meta?.['cognition.ai/subagent_context'])
+        ? 'sidekick'
+        : null;
+    };
     // 本轮已见的工具调用快照：真实 ACP 的 request_permission 往往只带
     // toolCallId，标题/命令要从先前的 tool_call 更新里回填。
     const toolById = new Map();
@@ -217,6 +340,7 @@ export function runTurn({
       for (const p of pending.values()) clearTimeout(p.timer);
       pending.clear();
       openPerms.clear();
+      openElis.clear();
       signal?.removeEventListener('abort', onAbort);
     }
 
@@ -252,8 +376,8 @@ export function runTurn({
       return new Promise((res, rej) => {
         const id = nextId++;
         const expire = () => {
-          // prompt 期间 agent 在等用户做权限决策 → 不是卡死，顺延计时
-          if (method === 'session/prompt' && openPerms.size > 0) {
+          // prompt 期间 agent 在等用户做权限/提问决策 → 不是卡死，顺延计时
+          if (method === 'session/prompt' && (openPerms.size > 0 || openElis.size > 0)) {
             const p = pending.get(id);
             if (p) p.timer = setTimeout(expire, timeoutMs);
             return;
@@ -282,6 +406,42 @@ export function runTurn({
         id: requestId,
         result: { outcome: { outcome: 'cancelled' } },
       });
+    }
+
+    function cancelElicitation(requestId) {
+      write({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: { action: 'cancel' },
+      });
+    }
+
+    // work 模式：agent 提问转交 UI 表单；discussion/无 hook 一律 cancel。
+    // answer 为 null（UI 关闭/回合收尾）→ cancel；action 仅接受 accept/decline，
+    // content 按 schema 清洗后透传。
+    function handleElicitation(msg) {
+      const info0 = normalizeElicitation(msg.params);
+      if (!info0) {
+        cancelElicitation(msg.id);
+        return;
+      }
+      const info = { requestId: crypto.randomUUID(), ...info0 };
+      openElis.add(msg.id);
+      const done = () => openElis.delete(msg.id);
+      Promise.resolve(onElicitation(info))
+        .catch(() => null)
+        .then((answer) => {
+          done();
+          const action = answer?.action === 'accept' ? 'accept' : answer?.action === 'decline' ? 'decline' : 'cancel';
+          write({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result:
+              action === 'accept'
+                ? { action, content: sanitizeElicitationContent(info, answer?.content) }
+                : { action },
+          });
+        });
     }
 
     // work 模式：权限请求转交 UI；只允许 allow_once / reject_once，绝不自动批准。
@@ -330,6 +490,8 @@ export function runTurn({
       }
       for (const id of openPerms) cancelPermission(id);
       openPerms.clear();
+      for (const id of openElis) cancelElicitation(id);
+      openElis.clear();
       failAll(new AbortError());
       fail(new AbortError());
     }
@@ -370,6 +532,9 @@ export function runTurn({
         if (msg.method === 'session/request_permission') {
           if (isWork && onPermission) handlePermission(msg);
           else cancelPermission(msg.id); // discussion/无 hook：一律拒绝
+        } else if (msg.method === 'elicitation/create') {
+          if (isWork && onElicitation) handleElicitation(msg);
+          else cancelElicitation(msg.id); // discussion/无 hook：一律取消
         } else {
           write({
             jsonrpc: '2.0',
@@ -387,7 +552,7 @@ export function runTurn({
         clearTimeout(p.timer);
         if (msg.error) {
           const m = typeof msg.error.message === 'string' ? msg.error.message.slice(0, 300) : '';
-          p.reject(new AcpError(`Devin CLI 返回错误${m ? `：${m}` : ''}`));
+          p.reject(new AcpRpcError(`Devin CLI 返回错误${m ? `：${m}` : ''}`));
         } else {
           p.resolve(msg.result);
         }
@@ -398,30 +563,52 @@ export function runTurn({
       if (msg.method === 'session/update' && msg.params?.sessionId === realSessionId) {
         pokePromptTimer(); // 流式更新 = agent 还活着
         const u = msg.params.update;
+        // 显式角色标记可出现在 update / content / params / message 任一层级的 _meta。
+        const explicitRole = roleOfMeta(
+          u?._meta,
+          u?.content?._meta,
+          msg.params._meta,
+          msg._meta,
+        );
         if (
           u?.sessionUpdate === 'agent_message_chunk' &&
           u.content?.type === 'text' &&
           typeof u.content.text === 'string'
         ) {
+          emitRole(explicitRole || 'lead');
           acc += u.content.text;
           try {
             onDelta(u.content.text);
           } catch {}
+        } else if (u?.sessionUpdate === 'agent_thought_chunk') {
+          // 思考块只携带角色信号：内容不外显（私有推理不进回答文本）
+          emitRole(explicitRole || 'lead');
         } else if (
           u?.sessionUpdate === 'tool_call' ||
           u?.sessionUpdate === 'tool_call_update'
         ) {
           const tool = normalizeTool(u);
+          // 委派类工具（run_subagent 等）在 fusion 下由 sidekick 承担；
+          // 已知工具的稀疏进度沿用其既有角色，不逐条降级回 lead。
+          const prev = toolById.get(tool.id);
+          const delegated =
+            [
+              u._meta?.['cognition.ai/inferenceToolName'],
+              u._meta?.['cognition.ai/toolName'],
+            ].includes('run_subagent') ||
+            /sidekick|subagent/i.test(String(u.rawInput?.profile || ''));
+          const role = explicitRole || (delegated ? 'sidekick' : prev?.role || 'lead');
+          emitRole(role);
           if (tool.id) {
             // 合并非空字段到本轮快照（后续更新可能只带 status）；
             // 供权限请求按 toolCallId 回填标题/kind/命令。
-            const prev = toolById.get(tool.id);
             toolById.set(tool.id, {
               ...tool,
               title: tool.title || prev?.title || '',
               kind: tool.kind === 'other' && prev?.kind ? prev.kind : tool.kind,
               command: tool.command || prev?.command || '',
               output: tool.output || prev?.output || '',
+              role,
             });
             if (toolById.size > TOOL_MAP_CAP) {
               toolById.delete(toolById.keys().next().value);
@@ -433,9 +620,16 @@ export function runTurn({
             }
           }
         } else if (isWork && u?.sessionUpdate === 'config_option_update') {
-          // 回合中模型被改动（agent 侧/其它客户端）：以最新上报为准
+          // 回合中模型被改动（agent 侧/其它客户端）：以最新上报为准；
+          // 换模型 = 新主导者——角色复位 lead 并即时透出（fusion 指示器跟随）。
           const m = updateModel(u);
-          if (m) effectiveModel = m;
+          if (m && m !== effectiveModel) {
+            effectiveModel = m;
+            currentRole = 'lead';
+            try {
+              onModel?.(m);
+            } catch {}
+          }
         }
       }
     });
@@ -444,7 +638,14 @@ export function runTurn({
       if (signal?.aborted) throw new AbortError();
       const init = await request(
         'initialize',
-        { protocolVersion: 1, clientCapabilities: {} },
+        {
+          protocolVersion: 1,
+          clientCapabilities:
+            // 声明 form elicitation 能力后，agent 的 ask_user_question 走
+            // 标准 elicitation/create 而非纯文本提问；无 hook 时不声明，
+            // agent 按 spec 回退到文本提问或直接不问。
+            isWork && onElicitation ? { elicitation: { form: {} } } : {},
+        },
         requestTimeout,
       );
       if (init?.protocolVersion !== 1) {
@@ -464,9 +665,14 @@ export function runTurn({
           effectiveModel = responseModel(loaded) ?? effectiveModel;
         } catch (e) {
           if (e instanceof AbortError) throw e;
-          throw new AcpError(
-            '无法恢复之前的 Devin 会话（可能已过期或被删除）；请开新对话或重试',
-          );
+          // RPC 拒绝 = 会话确实失效：交给上层提示并用本地记录重试；
+          // 其余失败（进程退出/超时/abort 之外）只是暂时不可达，保留会话 id。
+          if (e instanceof AcpRpcError) {
+            throw new AcpSessionLoadError(
+              '无法恢复之前的 Devin 会话；重试时将使用当前对话的记录继续',
+            );
+          }
+          throw new AcpError('暂时无法加载 Devin 会话，请重试');
         }
         realSessionId = sessionId;
       } else {
@@ -536,6 +742,13 @@ export function runTurn({
             `无法将 Devin 会话切换到 ${permissionMode} 模式，本轮未发送`,
           );
         }
+      }
+      if (isWork && effectiveModel && onModel) {
+        // 配置下发完毕、prompt 之前上报实际模型：fusion 配对不必等 done
+        // 就能在客户端展示 lead/sidekick 指示。
+        try {
+          onModel(effectiveModel);
+        } catch {}
       }
       // 回放内容完全由调用侧决定：新会话=完整历史（支线已折叠入各回合），
       // 原生续聊=仅支线补充记录（主线 Devin 侧已有）；无支线时为空历史。
